@@ -234,6 +234,16 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_targets (
+            user_id INTEGER PRIMARY KEY,
+            target_pnl REAL NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        """
+    )
     conn.commit()
 
     ensure_column(conn, "accounts", "user_id", "user_id INTEGER")
@@ -431,6 +441,31 @@ def save_user_theme_profile(conn: sqlite3.Connection, user_id: int, profile_name
             theme["accent_color"],
             now,
         ),
+    )
+    conn.commit()
+
+
+def get_user_target_pnl(conn: sqlite3.Connection, user_id: int) -> float:
+    row = conn.execute(
+        "SELECT target_pnl FROM user_targets WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        return 0.0
+    return float(row["target_pnl"])
+
+
+def save_user_target_pnl(conn: sqlite3.Connection, user_id: int, target_pnl: float) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """
+        INSERT INTO user_targets (user_id, target_pnl, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            target_pnl = excluded.target_pnl,
+            updated_at = excluded.updated_at
+        """,
+        (user_id, float(target_pnl), now),
     )
     conn.commit()
 
@@ -1857,6 +1892,13 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
     c6.metric("Account Balance", f"${m['account_balance']:,.2f}")
     c7.metric("Win Streak", m["win_streak"], delta=f"Best {m['best_win_streak']}")
 
+    target_pnl = get_user_target_pnl(conn, user_id)
+    if target_pnl > 0:
+        scope_label = selected_dashboard_account
+        progress_ratio = max(0.0, min(1.0, m["total_net"] / target_pnl))
+        st.markdown(f"Target P&L Progress ({scope_label})")
+        st.progress(progress_ratio, text=f"${m['total_net']:,.2f} / ${target_pnl:,.2f}")
+
     tab1, tab2, tab3, tab4 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts"])
 
     with tab1:
@@ -2332,6 +2374,24 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 use_container_width=True,
                 hide_index=True,
             )
+
+        st.markdown("Target P&L")
+        with st.form("target_pnl_form", clear_on_submit=False):
+            target_input = st.number_input(
+                "Set Target P&L",
+                min_value=0.0,
+                value=float(get_user_target_pnl(conn, user_id)),
+                step=50.0,
+                help="Dashboard will show progress toward this target.",
+            )
+            target_submitted = st.form_submit_button("Save Target")
+            if target_submitted:
+                try:
+                    save_user_target_pnl(conn, user_id, float(target_input))
+                    st.success("Target P&L saved.")
+                    st.rerun()
+                except Exception as exc:
+                    report_exception("Save target P&L failed", exc)
 
         st.markdown("Add account")
         with st.form("account_form", clear_on_submit=True):

@@ -1895,9 +1895,80 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
     target_pnl = get_user_target_pnl(conn, user_id)
     if target_pnl > 0:
         scope_label = selected_dashboard_account
-        progress_ratio = max(0.0, min(1.0, m["total_net"] / target_pnl))
-        st.markdown(f"Target P&L Progress ({scope_label})")
-        st.progress(progress_ratio, text=f"${m['total_net']:,.2f} / ${target_pnl:,.2f}")
+        progress_raw = m["total_net"] / target_pnl if target_pnl else 0.0
+        progress_ratio = max(0.0, min(1.0, progress_raw))
+        progress_pct = max(0.0, progress_raw * 100)
+        progress_color = "#22c55e" if m["total_net"] >= 0 else "#ef4444"
+        status_text = (
+            f"${(target_pnl - m['total_net']):,.2f} left to target"
+            if m["total_net"] < target_pnl
+            else f"Target exceeded by ${max(0.0, m['total_net'] - target_pnl):,.2f}"
+        )
+        st.markdown(
+            f"""
+            <style>
+            .target-card {{
+                border: 1px solid color-mix(in srgb, {progress_color} 45%, #2a3346 55%);
+                border-radius: 12px;
+                padding: 10px 12px 12px 12px;
+                background: linear-gradient(180deg, rgba(18, 24, 38, 0.9), rgba(15, 20, 32, 0.95));
+                margin-top: 6px;
+                margin-bottom: 8px;
+            }}
+            .target-row {{
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                gap: 10px;
+                margin-bottom: 7px;
+            }}
+            .target-title {{
+                font-size: 13px;
+                font-weight: 700;
+                letter-spacing: 0.2px;
+                color: #dce5f7;
+            }}
+            .target-numbers {{
+                font-size: 13px;
+                font-weight: 700;
+                color: #e9eefb;
+            }}
+            .target-track {{
+                width: 100%;
+                height: 10px;
+                border-radius: 999px;
+                background: #232a3b;
+                overflow: hidden;
+                border: 1px solid #344059;
+            }}
+            .target-fill {{
+                height: 100%;
+                width: {min(progress_pct, 100):.2f}%;
+                background: linear-gradient(90deg, color-mix(in srgb, {progress_color} 75%, #ffffff 25%), {progress_color});
+                transition: width 0.35s ease;
+            }}
+            .target-meta {{
+                margin-top: 6px;
+                display: flex;
+                justify-content: space-between;
+                font-size: 12px;
+                color: #a8b4ca;
+            }}
+            </style>
+            <div class="target-card">
+                <div class="target-row">
+                    <div class="target-title">Target P&L Progress ({scope_label})</div>
+                    <div class="target-numbers">${m['total_net']:,.2f} / ${target_pnl:,.2f}</div>
+                </div>
+                <div class="target-track"><div class="target-fill"></div></div>
+                <div class="target-meta">
+                    <span>{status_text}</span>
+                    <span>{progress_pct:.1f}%</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     tab1, tab2, tab3, tab4 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts"])
 

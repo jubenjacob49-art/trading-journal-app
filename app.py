@@ -1865,13 +1865,6 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
             )
             side = col_c.selectbox("Side", options=["Long", "Short"], key="trade_side_select")
 
-            col_d, col_e, col_f = st.columns(3)
-            symbol = col_d.text_input("Symbol", placeholder="AAPL", key="trade_symbol_input")
-            quantity = col_e.number_input(
-                "Quantity", min_value=0.0, value=1.0, step=1.0, key="trade_qty_input"
-            )
-            fees = col_f.number_input("Fees", min_value=0.0, value=0.0, step=0.01, key="trade_fees_input")
-
             recent_symbols = []
             if not trades_df.empty and "symbol" in trades_df.columns:
                 recent_symbols = list(
@@ -1886,9 +1879,20 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     key="trade_recent_symbol_select",
                 )
                 if recent_choice != "Select...":
-                    st.session_state["trade_symbol_input"] = recent_choice
+                    st.session_state["trade_symbol_prefill"] = recent_choice
                     st.session_state["trade_recent_symbol_select"] = "Select..."
                     st.rerun()
+
+            if st.session_state.get("trade_symbol_prefill"):
+                st.session_state["trade_symbol_input"] = st.session_state["trade_symbol_prefill"]
+                st.session_state["trade_symbol_prefill"] = None
+
+            col_d, col_e, col_f = st.columns(3)
+            symbol = col_d.text_input("Symbol", placeholder="AAPL", key="trade_symbol_input")
+            quantity = col_e.number_input(
+                "Quantity", min_value=0.0, value=1.0, step=1.0, key="trade_qty_input"
+            )
+            fees = col_f.number_input("Fees", min_value=0.0, value=0.0, step=0.01, key="trade_fees_input")
 
             col_g, col_h = st.columns(2)
             manual_pnl_mode = st.checkbox("Add a P&NL", value=False, key="trade_manual_pnl_mode")

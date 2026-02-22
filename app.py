@@ -29,6 +29,26 @@ LOGO_CANDIDATES = [
 ]
 PAGE_ORDER = {"landing": 0, "login": 1, "register": 2, "app": 3}
 DEBUG_DEFAULT = os.getenv("APP_DEBUG", "0").strip() == "1"
+THEME_PRESETS = {
+    "Midnight": {
+        "bg_color": "#0f1117",
+        "surface_color": "#1f2333",
+        "text_color": "#f6f8ff",
+        "accent_color": "#5b7cfa",
+    },
+    "Forest": {
+        "bg_color": "#0f1714",
+        "surface_color": "#1c2b24",
+        "text_color": "#eefcf4",
+        "accent_color": "#25a86c",
+    },
+    "Slate": {
+        "bg_color": "#14161c",
+        "surface_color": "#262a35",
+        "text_color": "#f0f3ff",
+        "accent_color": "#8a6bff",
+    },
+}
 
 
 @dataclass
@@ -183,6 +203,20 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_themes (
+            user_id INTEGER PRIMARY KEY,
+            theme_name TEXT NOT NULL,
+            bg_color TEXT NOT NULL,
+            surface_color TEXT NOT NULL,
+            text_color TEXT NOT NULL,
+            accent_color TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        """
+    )
     conn.commit()
 
     # Backward compatibility for existing DBs created before auth.
@@ -306,6 +340,97 @@ def get_accounts(conn: sqlite3.Connection, user_id: int) -> pd.DataFrame:
         "SELECT * FROM accounts WHERE user_id = ? ORDER BY name",
         conn,
         params=(user_id,),
+    )
+
+
+def get_user_theme(conn: sqlite3.Connection, user_id: int) -> dict:
+    row = conn.execute(
+        """
+        SELECT theme_name, bg_color, surface_color, text_color, accent_color
+        FROM user_themes
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+    if not row:
+        default = THEME_PRESETS["Midnight"].copy()
+        default["theme_name"] = "Midnight"
+        return default
+    return {
+        "theme_name": str(row["theme_name"]),
+        "bg_color": str(row["bg_color"]),
+        "surface_color": str(row["surface_color"]),
+        "text_color": str(row["text_color"]),
+        "accent_color": str(row["accent_color"]),
+    }
+
+
+def save_user_theme(conn: sqlite3.Connection, user_id: int, theme: dict) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """
+        INSERT INTO user_themes (user_id, theme_name, bg_color, surface_color, text_color, accent_color, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            theme_name=excluded.theme_name,
+            bg_color=excluded.bg_color,
+            surface_color=excluded.surface_color,
+            text_color=excluded.text_color,
+            accent_color=excluded.accent_color,
+            updated_at=excluded.updated_at
+        """,
+        (
+            user_id,
+            theme["theme_name"],
+            theme["bg_color"],
+            theme["surface_color"],
+            theme["text_color"],
+            theme["accent_color"],
+            now,
+        ),
+    )
+    conn.commit()
+
+
+def apply_user_theme(theme: dict) -> None:
+    bg = theme["bg_color"]
+    surface = theme["surface_color"]
+    text = theme["text_color"]
+    accent = theme["accent_color"]
+    st.markdown(
+        f"""
+        <style>
+        [data-testid="stAppViewContainer"] {{
+            background: {bg} !important;
+        }}
+        [data-testid="stSidebar"] {{
+            background: color-mix(in srgb, {surface} 82%, black 18%) !important;
+        }}
+        [data-testid="stSidebar"] * {{
+            color: {text} !important;
+        }}
+        h1, h2, h3, h4, h5, h6, p, label, span, div {{
+            color: {text};
+        }}
+        [data-testid="stMetric"] {{
+            background: color-mix(in srgb, {surface} 85%, black 15%);
+            border: 1px solid color-mix(in srgb, {accent} 42%, #222 58%);
+            border-radius: 10px;
+            padding: 0.45rem 0.5rem;
+        }}
+        .stButton button {{
+            border-color: color-mix(in srgb, {accent} 55%, #444 45%) !important;
+        }}
+        .stButton button[kind="primary"] {{
+            background: {accent} !important;
+            color: #ffffff !important;
+        }}
+        .stButton button:hover {{
+            filter: brightness(1.08);
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -1352,6 +1477,25 @@ def render_register_page(conn: sqlite3.Connection) -> None:
 
 
 def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
+    saved_theme = get_user_theme(conn, user_id)
+    if st.session_state.get("theme_editor_user_id") != user_id:
+        st.session_state["theme_editor_user_id"] = user_id
+        st.session_state["theme_name"] = saved_theme["theme_name"]
+        st.session_state["theme_bg_color"] = saved_theme["bg_color"]
+        st.session_state["theme_surface_color"] = saved_theme["surface_color"]
+        st.session_state["theme_text_color"] = saved_theme["text_color"]
+        st.session_state["theme_accent_color"] = saved_theme["accent_color"]
+        st.session_state["theme_last_preset"] = saved_theme["theme_name"]
+
+    active_theme = {
+        "theme_name": st.session_state.get("theme_name", "Midnight"),
+        "bg_color": st.session_state.get("theme_bg_color", THEME_PRESETS["Midnight"]["bg_color"]),
+        "surface_color": st.session_state.get("theme_surface_color", THEME_PRESETS["Midnight"]["surface_color"]),
+        "text_color": st.session_state.get("theme_text_color", THEME_PRESETS["Midnight"]["text_color"]),
+        "accent_color": st.session_state.get("theme_accent_color", THEME_PRESETS["Midnight"]["accent_color"]),
+    }
+    apply_user_theme(active_theme)
+
     st.title("Trading Journal")
     st.caption("Track trades, accounts, and daily P&L in one place.")
     if st.session_state.get("show_welcome_once"):
@@ -1382,6 +1526,59 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
     with st.sidebar:
         st.markdown(f"**User:** {st.session_state.get('auth_username', 'Unknown')}")
         st.toggle("Debug Mode", key="debug_mode")
+        with st.expander("Themes", expanded=False):
+            preset_options = list(THEME_PRESETS.keys()) + ["Custom"]
+            default_preset = (
+                active_theme["theme_name"] if active_theme["theme_name"] in preset_options else "Custom"
+            )
+            preset = st.selectbox(
+                "Preset",
+                options=preset_options,
+                index=preset_options.index(default_preset),
+                key="theme_preset_select",
+            )
+
+            if st.session_state.get("theme_last_preset") != preset:
+                if preset in THEME_PRESETS:
+                    st.session_state["theme_name"] = preset
+                    st.session_state["theme_bg_color"] = THEME_PRESETS[preset]["bg_color"]
+                    st.session_state["theme_surface_color"] = THEME_PRESETS[preset]["surface_color"]
+                    st.session_state["theme_text_color"] = THEME_PRESETS[preset]["text_color"]
+                    st.session_state["theme_accent_color"] = THEME_PRESETS[preset]["accent_color"]
+                else:
+                    st.session_state["theme_name"] = "Custom"
+                st.session_state["theme_last_preset"] = preset
+
+            st.color_picker("Background", key="theme_bg_color")
+            st.color_picker("Surface", key="theme_surface_color")
+            st.color_picker("Text", key="theme_text_color")
+            st.color_picker("Accent", key="theme_accent_color")
+
+            t1, t2 = st.columns(2)
+            if t1.button("Save Theme", use_container_width=True):
+                try:
+                    theme_to_save = {
+                        "theme_name": preset if preset in THEME_PRESETS else "Custom",
+                        "bg_color": st.session_state["theme_bg_color"],
+                        "surface_color": st.session_state["theme_surface_color"],
+                        "text_color": st.session_state["theme_text_color"],
+                        "accent_color": st.session_state["theme_accent_color"],
+                    }
+                    save_user_theme(conn, user_id, theme_to_save)
+                    st.session_state["theme_name"] = theme_to_save["theme_name"]
+                    st.success("Theme saved.")
+                except Exception as exc:
+                    report_exception("Save theme failed", exc)
+            if t2.button("Reset", use_container_width=True):
+                base = THEME_PRESETS["Midnight"]
+                st.session_state["theme_name"] = "Midnight"
+                st.session_state["theme_bg_color"] = base["bg_color"]
+                st.session_state["theme_surface_color"] = base["surface_color"]
+                st.session_state["theme_text_color"] = base["text_color"]
+                st.session_state["theme_accent_color"] = base["accent_color"]
+                st.session_state["theme_preset_select"] = "Midnight"
+                st.session_state["theme_last_preset"] = "Midnight"
+                st.rerun()
         if st.button("Logout", use_container_width=True):
             try:
                 revoke_remember_token(conn, st.session_state.get("remember_token"))

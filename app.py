@@ -1615,6 +1615,9 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
         st.toggle("Debug Mode", key="debug_mode")
         with st.expander("Themes", expanded=False):
             saved_profiles = list_user_theme_profiles(conn, user_id)
+            st.caption(f"Active: {st.session_state.get('theme_name', 'Custom')}")
+
+            st.markdown("Preset")
             preset_options = list(THEME_PRESETS.keys()) + ["Custom"]
             default_preset = (
                 active_theme["theme_name"] if active_theme["theme_name"] in preset_options else "Custom"
@@ -1637,6 +1640,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     st.session_state["theme_name"] = "Custom"
                 st.session_state["theme_last_preset"] = preset
 
+            st.markdown("Colors")
             st.color_picker("Background", key="theme_bg_color")
             st.color_picker("Surface", key="theme_surface_color")
             st.color_picker("Text", key="theme_text_color")
@@ -1661,6 +1665,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 st.session_state["theme_reset_requested"] = True
                 st.rerun()
 
+            st.markdown("---")
             st.markdown("Theme Profiles")
             profile_name = st.text_input(
                 "Profile Name",
@@ -1668,6 +1673,12 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 key="theme_profile_name",
                 placeholder="My Theme",
             )
+            selected_profile = st.selectbox(
+                "Saved Profiles",
+                options=["Select..."] + saved_profiles,
+                key="theme_profile_select",
+            )
+
             p1, p2 = st.columns(2)
             if p1.button("Save As", use_container_width=True):
                 if not profile_name.strip():
@@ -1686,13 +1697,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                         st.rerun()
                     except Exception as exc:
                         report_exception("Save theme profile failed", exc)
-
-            selected_profile = p2.selectbox(
-                "Load",
-                options=["Select..."] + saved_profiles,
-                key="theme_profile_select",
-            )
-            if st.button("Load Profile", use_container_width=True):
+            if p2.button("Load Profile", use_container_width=True):
                 if selected_profile == "Select...":
                     st.warning("Choose a saved profile first.")
                 else:

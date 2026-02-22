@@ -477,10 +477,23 @@ def apply_user_theme(theme: dict) -> None:
         f"""
         <style>
         [data-testid="stAppViewContainer"] {{
-            background: {bg} !important;
+            background:
+                radial-gradient(circle at 8% 10%, color-mix(in srgb, {accent} 22%, transparent) 0%, transparent 26%),
+                radial-gradient(circle at 92% 4%, color-mix(in srgb, {surface} 50%, transparent) 0%, transparent 22%),
+                linear-gradient(160deg, color-mix(in srgb, {bg} 90%, #06080f 10%) 0%, {bg} 100%) !important;
+        }}
+        section.main > div[data-testid="stMainBlockContainer"] {{
+            max-width: 1500px;
+            padding-top: 1.2rem !important;
         }}
         [data-testid="stSidebar"] {{
-            background: color-mix(in srgb, {surface} 82%, black 18%) !important;
+            background:
+                linear-gradient(
+                    180deg,
+                    color-mix(in srgb, {surface} 88%, black 12%) 0%,
+                    color-mix(in srgb, {surface} 80%, black 20%) 100%
+                ) !important;
+            border-right: 1px solid color-mix(in srgb, {accent} 30%, #283048 70%);
         }}
         [data-testid="stSidebar"] * {{
             color: {text} !important;
@@ -488,21 +501,91 @@ def apply_user_theme(theme: dict) -> None:
         h1, h2, h3, h4, h5, h6, p, label, span, div {{
             color: {text};
         }}
+        h1 {{
+            font-weight: 800 !important;
+            letter-spacing: 0.2px;
+        }}
+        .stCaption {{
+            color: color-mix(in srgb, {text} 72%, #8a93a5 28%) !important;
+        }}
+        [data-testid="stVerticalBlock"] > [data-testid="element-container"] {{
+            margin-bottom: 0.35rem;
+        }}
         [data-testid="stMetric"] {{
-            background: color-mix(in srgb, {surface} 85%, black 15%);
-            border: 1px solid color-mix(in srgb, {accent} 42%, #222 58%);
-            border-radius: 10px;
-            padding: 0.45rem 0.5rem;
+            background:
+                linear-gradient(
+                    180deg,
+                    color-mix(in srgb, {surface} 92%, black 8%) 0%,
+                    color-mix(in srgb, {surface} 86%, black 14%) 100%
+                );
+            border: 1px solid color-mix(in srgb, {accent} 38%, #1f2432 62%);
+            border-radius: 14px;
+            box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18);
+            padding: 0.5rem 0.55rem;
+        }}
+        [data-testid="stMetricLabel"] {{
+            font-weight: 600 !important;
+            color: color-mix(in srgb, {text} 80%, #9aa6bf 20%) !important;
+        }}
+        [data-testid="stMetricValue"] {{
+            font-weight: 700 !important;
+        }}
+        .stTabs [data-baseweb="tab-list"] {{
+            gap: 0.5rem;
+            border-bottom: 1px solid color-mix(in srgb, {accent} 24%, #2b3141 76%);
+            padding-bottom: 0.2rem;
+        }}
+        .stTabs [data-baseweb="tab"] {{
+            border-radius: 9px 9px 0 0;
+            background: transparent;
+            padding: 0.45rem 0.7rem;
+            font-weight: 600;
+        }}
+        .stTabs [aria-selected="true"] {{
+            background: color-mix(in srgb, {surface} 70%, #121622 30%) !important;
+            border: 1px solid color-mix(in srgb, {accent} 45%, #293047 55%) !important;
+            border-bottom: 1px solid color-mix(in srgb, {surface} 70%, #121622 30%) !important;
+        }}
+        div[data-baseweb="input"] > div,
+        div[data-baseweb="base-input"] > div,
+        div[data-baseweb="select"] > div,
+        .stDateInput > div > div {{
+            background: color-mix(in srgb, {surface} 85%, #0d111b 15%) !important;
+            border: 1px solid color-mix(in srgb, {accent} 30%, #2c3345 70%) !important;
+            border-radius: 10px !important;
+        }}
+        textarea, input {{
+            color: {text} !important;
+        }}
+        [data-testid="stDataFrame"] {{
+            border: 1px solid color-mix(in srgb, {accent} 25%, #2b3142 75%);
+            border-radius: 12px;
+            overflow: hidden;
+        }}
+        [data-testid="stExpander"] {{
+            border: 1px solid color-mix(in srgb, {accent} 30%, #2d3448 70%);
+            border-radius: 12px;
+            background: color-mix(in srgb, {surface} 86%, black 14%);
         }}
         .stButton button {{
+            border-radius: 10px !important;
+            background: color-mix(in srgb, {surface} 82%, black 18%) !important;
+            color: {text} !important;
             border-color: color-mix(in srgb, {accent} 55%, #444 45%) !important;
+            transition: transform 0.15s ease, filter 0.15s ease, box-shadow 0.15s ease;
         }}
         .stButton button[kind="primary"] {{
-            background: {accent} !important;
+            background: linear-gradient(
+                90deg,
+                color-mix(in srgb, {accent} 90%, #ffffff 10%),
+                color-mix(in srgb, {accent} 75%, #000000 25%)
+            ) !important;
             color: #ffffff !important;
         }}
         .stButton button:hover {{
             filter: brightness(1.08);
+            transform: translateY(-1px);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.25);
         }}
         </style>
         """,

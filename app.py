@@ -625,7 +625,7 @@ def render_pnl_calendar(trades_df: pd.DataFrame, month: int, year: int) -> None:
         }
         .pnl-grid {
             display: grid;
-            grid-template-columns: repeat(6, minmax(90px, 1fr));
+            grid-template-columns: repeat(8, minmax(90px, 1fr));
             gap: 8px;
         }
         .pnl-head {
@@ -708,7 +708,7 @@ def render_pnl_calendar(trades_df: pd.DataFrame, month: int, year: int) -> None:
         unsafe_allow_html=True,
     )
 
-    headers = ["Mon", "Tue", "Wed", "Thu", "Fri", "P&L"]
+    headers = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun", "P&L"]
     html_parts = ['<div class="pnl-wrap"><div class="pnl-grid">']
 
     for i, h in enumerate(headers):
@@ -718,7 +718,7 @@ def render_pnl_calendar(trades_df: pd.DataFrame, month: int, year: int) -> None:
     for week in weeks:
         week_pnl = 0.0
         week_trades = 0
-        for day in week[:5]:
+        for day in week[:7]:
             if day == 0:
                 html_parts.append('<div class="day-cell"></div>')
                 continue
@@ -885,7 +885,7 @@ def inject_responsive_css() -> None:
                 overflow-x: auto !important;
             }
             .pnl-grid {
-                min-width: 720px !important;
+                min-width: 980px !important;
             }
         }
         @media (max-width: 600px) {

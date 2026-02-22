@@ -916,6 +916,23 @@ def account_metrics(trades_df: pd.DataFrame, cashflows_df: pd.DataFrame) -> dict
     }
 
 
+def period_pnl_metrics(trades_df: pd.DataFrame) -> dict:
+    if trades_df.empty:
+        return {"daily": 0.0, "weekly": 0.0, "monthly": 0.0}
+
+    temp = trades_df.copy()
+    temp["trade_date"] = pd.to_datetime(temp["trade_date"]).dt.date
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+
+    daily_pnl = float(temp[temp["trade_date"] == today]["net_pnl"].sum())
+    weekly_pnl = float(temp[(temp["trade_date"] >= week_start) & (temp["trade_date"] <= today)]["net_pnl"].sum())
+    monthly_pnl = float(temp[(temp["trade_date"] >= month_start) & (temp["trade_date"] <= today)]["net_pnl"].sum())
+
+    return {"daily": daily_pnl, "weekly": weekly_pnl, "monthly": monthly_pnl}
+
+
 def render_pnl_calendar(trades_df: pd.DataFrame, month: int, year: int) -> None:
     st.subheader("P&L Calendar")
     temp = trades_df.copy()
@@ -1883,6 +1900,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
         scoped_cashflows = cashflows_df[cashflows_df["account_id"] == selected_account_id]
 
     m = account_metrics(scoped_trades, scoped_cashflows)
+    p = period_pnl_metrics(scoped_trades)
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Total Net P&L", f"${m['total_net']:,.2f}")
     c2.metric("Win Rate", f"{m['win_rate']:.1f}%")
@@ -1891,6 +1909,11 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
     c5.metric("Avg Net/Trade", f"${m['avg_net']:,.2f}")
     c6.metric("Account Balance", f"${m['account_balance']:,.2f}")
     c7.metric("Win Streak", m["win_streak"], delta=f"Best {m['best_win_streak']}")
+
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Daily P&L", f"${p['daily']:,.2f}")
+    p2.metric("Weekly P&L", f"${p['weekly']:,.2f}")
+    p3.metric("Monthly P&L", f"${p['monthly']:,.2f}")
 
     target_pnl = get_user_target_pnl(conn, user_id)
     if target_pnl > 0:

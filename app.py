@@ -484,7 +484,9 @@ def apply_user_theme(theme: dict) -> None:
         }}
         section.main > div[data-testid="stMainBlockContainer"] {{
             max-width: 1500px;
-            padding-top: 1.2rem !important;
+            padding-top: 0.35rem !important;
+            padding-left: 0.65rem !important;
+            padding-right: 0.9rem !important;
         }}
         [data-testid="stSidebar"] {{
             background:

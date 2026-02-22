@@ -369,17 +369,19 @@ def add_account(
     conn.commit()
 
 
-def delete_trade(conn: sqlite3.Connection, trade_id: int, user_id: int) -> None:
+def delete_trade(conn: sqlite3.Connection, trade_id: int, user_id: int) -> bool:
     row = conn.execute(
         "SELECT image_path FROM trades WHERE id = ? AND user_id = ?",
         (trade_id, user_id),
     ).fetchone()
-    conn.execute("DELETE FROM trades WHERE id = ? AND user_id = ?", (trade_id, user_id))
+    result = conn.execute("DELETE FROM trades WHERE id = ? AND user_id = ?", (trade_id, user_id))
     conn.commit()
+    deleted = result.rowcount > 0
     if row and row["image_path"]:
         image_file = Path(row["image_path"])
         if image_file.exists():
             image_file.unlink(missing_ok=True)
+    return deleted
 
 
 def add_cashflow(
@@ -403,11 +405,12 @@ def add_cashflow(
     conn.commit()
 
 
-def delete_account(conn: sqlite3.Connection, user_id: int, account_id: int) -> None:
+def delete_account(conn: sqlite3.Connection, user_id: int, account_id: int) -> bool:
     conn.execute("DELETE FROM trades WHERE user_id = ? AND account_id = ?", (user_id, account_id))
     conn.execute("DELETE FROM account_cashflows WHERE user_id = ? AND account_id = ?", (user_id, account_id))
-    conn.execute("DELETE FROM accounts WHERE user_id = ? AND id = ?", (user_id, account_id))
+    result = conn.execute("DELETE FROM accounts WHERE user_id = ? AND id = ?", (user_id, account_id))
     conn.commit()
+    return result.rowcount > 0
 
 
 def account_metrics(trades_df: pd.DataFrame, cashflows_df: pd.DataFrame) -> dict:
@@ -707,6 +710,67 @@ def apply_pending_transition() -> None:
         unsafe_allow_html=True,
     )
     st.session_state["pending_transition_animation"] = None
+
+
+def inject_responsive_css() -> None:
+    st.markdown(
+        """
+        <style>
+        @media (max-width: 900px) {
+            section.main > div[data-testid="stMainBlockContainer"] {
+                padding-left: 0.75rem !important;
+                padding-right: 0.75rem !important;
+            }
+            div[data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap !important;
+                row-gap: 0.5rem !important;
+            }
+            div[data-testid="column"] {
+                min-width: 100% !important;
+                flex: 1 1 100% !important;
+            }
+            .landing-title {
+                font-size: 38px !important;
+            }
+            .load-logo,
+            .load-logo-fallback {
+                width: 140px !important;
+                height: 140px !important;
+            }
+            .welcome-name {
+                font-size: 40px !important;
+            }
+            .pnl-wrap {
+                overflow-x: auto !important;
+            }
+            .pnl-grid {
+                min-width: 720px !important;
+            }
+        }
+        @media (max-width: 600px) {
+            .landing-title {
+                font-size: 34px !important;
+            }
+            .welcome-name {
+                font-size: 34px !important;
+            }
+            .welcome-sub {
+                font-size: 14px !important;
+            }
+            .auth-title {
+                font-size: 30px !important;
+            }
+            .day-cell, .week-cell {
+                min-height: 80px !important;
+            }
+            button, input, textarea, [data-baseweb="select"] {
+                font-size: 16px !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_fullscreen_welcome(username: str) -> None:
@@ -1054,7 +1118,8 @@ def render_login_page(conn: sqlite3.Connection) -> None:
                         st.session_state["show_welcome_once"] = True
                         st.success(msg)
                         navigate_to("app")
-                    st.error(msg)
+                    else:
+                        st.error(msg)
 
             b1, b2 = st.columns(2)
             if b1.button("Back to Home", use_container_width=True):
@@ -1272,6 +1337,10 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
             if st.button("Save Trade", key="save_trade_btn"):
                 if not symbol.strip():
                     st.warning("Symbol is required.")
+                elif quantity <= 0:
+                    st.warning("Quantity must be greater than 0.")
+                elif entry_price <= 0 or exit_price <= 0:
+                    st.warning("Entry and exit price must be greater than 0.")
                 else:
                     image_path = save_trade_image(
                         trade_image,
@@ -1378,8 +1447,11 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 if not confirm_delete_trade:
                     st.warning("Tick confirm before deleting trade.")
                 else:
-                    delete_trade(conn, int(trade_id_delete), user_id)
-                    st.success(f"Deleted trade {trade_id_delete}.")
+                    deleted = delete_trade(conn, int(trade_id_delete), user_id)
+                    if deleted:
+                        st.success(f"Deleted trade {trade_id_delete}.")
+                    else:
+                        st.warning("Trade not found for this account.")
                     st.rerun()
 
             if not filtered.empty:
@@ -1546,8 +1618,11 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     account_id = int(
                         accounts_df.loc[accounts_df["name"] == delete_account_name, "id"].iloc[0]
                     )
-                    delete_account(conn, user_id=user_id, account_id=account_id)
-                    st.success(f"Deleted account '{delete_account_name}'.")
+                    deleted = delete_account(conn, user_id=user_id, account_id=account_id)
+                    if deleted:
+                        st.success(f"Deleted account '{delete_account_name}'.")
+                    else:
+                        st.warning("Account could not be deleted.")
                     st.rerun()
 
 
@@ -1575,6 +1650,7 @@ def main() -> None:
     conn = get_conn()
     init_db(conn)
     init_session_state()
+    inject_responsive_css()
     apply_pending_transition()
 
     if st.session_state["auth_user_id"]:

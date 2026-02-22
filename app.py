@@ -1487,6 +1487,17 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
         st.session_state["theme_accent_color"] = saved_theme["accent_color"]
         st.session_state["theme_last_preset"] = saved_theme["theme_name"]
 
+    if st.session_state.get("theme_reset_requested"):
+        base = THEME_PRESETS["Midnight"]
+        st.session_state["theme_name"] = "Midnight"
+        st.session_state["theme_bg_color"] = base["bg_color"]
+        st.session_state["theme_surface_color"] = base["surface_color"]
+        st.session_state["theme_text_color"] = base["text_color"]
+        st.session_state["theme_accent_color"] = base["accent_color"]
+        st.session_state["theme_preset_select"] = "Midnight"
+        st.session_state["theme_last_preset"] = "Midnight"
+        st.session_state["theme_reset_requested"] = False
+
     active_theme = {
         "theme_name": st.session_state.get("theme_name", "Midnight"),
         "bg_color": st.session_state.get("theme_bg_color", THEME_PRESETS["Midnight"]["bg_color"]),
@@ -1570,14 +1581,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 except Exception as exc:
                     report_exception("Save theme failed", exc)
             if t2.button("Reset", use_container_width=True):
-                base = THEME_PRESETS["Midnight"]
-                st.session_state["theme_name"] = "Midnight"
-                st.session_state["theme_bg_color"] = base["bg_color"]
-                st.session_state["theme_surface_color"] = base["surface_color"]
-                st.session_state["theme_text_color"] = base["text_color"]
-                st.session_state["theme_accent_color"] = base["accent_color"]
-                st.session_state["theme_preset_select"] = "Midnight"
-                st.session_state["theme_last_preset"] = "Midnight"
+                st.session_state["theme_reset_requested"] = True
                 st.rerun()
         if st.button("Logout", use_container_width=True):
             try:
@@ -2167,6 +2171,8 @@ def init_session_state() -> None:
         st.session_state["edit_trade_loaded_id"] = None
     if "debug_mode" not in st.session_state:
         st.session_state["debug_mode"] = DEBUG_DEFAULT
+    if "theme_reset_requested" not in st.session_state:
+        st.session_state["theme_reset_requested"] = False
 
 
 def main() -> None:

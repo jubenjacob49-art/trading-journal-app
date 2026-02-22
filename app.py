@@ -217,6 +217,22 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_theme_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            profile_name TEXT NOT NULL,
+            bg_color TEXT NOT NULL,
+            surface_color TEXT NOT NULL,
+            text_color TEXT NOT NULL,
+            accent_color TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, profile_name),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        """
+    )
     conn.commit()
 
     # Backward compatibility for existing DBs created before auth.
@@ -390,6 +406,66 @@ def save_user_theme(conn: sqlite3.Connection, user_id: int, theme: dict) -> None
         ),
     )
     conn.commit()
+
+
+def save_user_theme_profile(conn: sqlite3.Connection, user_id: int, profile_name: str, theme: dict) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """
+        INSERT INTO user_theme_profiles
+            (user_id, profile_name, bg_color, surface_color, text_color, accent_color, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, profile_name) DO UPDATE SET
+            bg_color=excluded.bg_color,
+            surface_color=excluded.surface_color,
+            text_color=excluded.text_color,
+            accent_color=excluded.accent_color,
+            updated_at=excluded.updated_at
+        """,
+        (
+            user_id,
+            profile_name.strip(),
+            theme["bg_color"],
+            theme["surface_color"],
+            theme["text_color"],
+            theme["accent_color"],
+            now,
+        ),
+    )
+    conn.commit()
+
+
+def list_user_theme_profiles(conn: sqlite3.Connection, user_id: int) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT profile_name
+        FROM user_theme_profiles
+        WHERE user_id = ?
+        ORDER BY profile_name
+        """,
+        (user_id,),
+    ).fetchall()
+    return [str(row["profile_name"]) for row in rows]
+
+
+def load_user_theme_profile(conn: sqlite3.Connection, user_id: int, profile_name: str) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT profile_name, bg_color, surface_color, text_color, accent_color
+        FROM user_theme_profiles
+        WHERE user_id = ? AND profile_name = ?
+        """,
+        (user_id, profile_name),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "theme_name": "Custom",
+        "bg_color": str(row["bg_color"]),
+        "surface_color": str(row["surface_color"]),
+        "text_color": str(row["text_color"]),
+        "accent_color": str(row["accent_color"]),
+    }
 
 
 def apply_user_theme(theme: dict) -> None:
@@ -1538,6 +1614,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
         st.markdown(f"**User:** {st.session_state.get('auth_username', 'Unknown')}")
         st.toggle("Debug Mode", key="debug_mode")
         with st.expander("Themes", expanded=False):
+            saved_profiles = list_user_theme_profiles(conn, user_id)
             preset_options = list(THEME_PRESETS.keys()) + ["Custom"]
             default_preset = (
                 active_theme["theme_name"] if active_theme["theme_name"] in preset_options else "Custom"
@@ -1583,6 +1660,59 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
             if t2.button("Reset", use_container_width=True):
                 st.session_state["theme_reset_requested"] = True
                 st.rerun()
+
+            st.markdown("Theme Profiles")
+            profile_name = st.text_input(
+                "Profile Name",
+                value=st.session_state.get("theme_profile_name", ""),
+                key="theme_profile_name",
+                placeholder="My Theme",
+            )
+            p1, p2 = st.columns(2)
+            if p1.button("Save As", use_container_width=True):
+                if not profile_name.strip():
+                    st.warning("Enter a profile name first.")
+                else:
+                    try:
+                        profile_theme = {
+                            "theme_name": "Custom",
+                            "bg_color": st.session_state["theme_bg_color"],
+                            "surface_color": st.session_state["theme_surface_color"],
+                            "text_color": st.session_state["theme_text_color"],
+                            "accent_color": st.session_state["theme_accent_color"],
+                        }
+                        save_user_theme_profile(conn, user_id, profile_name, profile_theme)
+                        st.success(f"Saved profile '{profile_name.strip()}'.")
+                        st.rerun()
+                    except Exception as exc:
+                        report_exception("Save theme profile failed", exc)
+
+            selected_profile = p2.selectbox(
+                "Load",
+                options=["Select..."] + saved_profiles,
+                key="theme_profile_select",
+            )
+            if st.button("Load Profile", use_container_width=True):
+                if selected_profile == "Select...":
+                    st.warning("Choose a saved profile first.")
+                else:
+                    try:
+                        loaded = load_user_theme_profile(conn, user_id, selected_profile)
+                        if not loaded:
+                            st.warning("Theme profile not found.")
+                        else:
+                            st.session_state["theme_name"] = "Custom"
+                            st.session_state["theme_bg_color"] = loaded["bg_color"]
+                            st.session_state["theme_surface_color"] = loaded["surface_color"]
+                            st.session_state["theme_text_color"] = loaded["text_color"]
+                            st.session_state["theme_accent_color"] = loaded["accent_color"]
+                            st.session_state["theme_preset_select"] = "Custom"
+                            st.session_state["theme_last_preset"] = "Custom"
+                            save_user_theme(conn, user_id, loaded)
+                            st.success(f"Loaded profile '{selected_profile}'.")
+                            st.rerun()
+                    except Exception as exc:
+                        report_exception("Load theme profile failed", exc)
         if st.button("Logout", use_container_width=True):
             try:
                 revoke_remember_token(conn, st.session_state.get("remember_token"))

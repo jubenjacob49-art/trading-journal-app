@@ -238,7 +238,10 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS user_targets (
             user_id INTEGER PRIMARY KEY,
-            target_pnl REAL NOT NULL,
+            target_pnl REAL NOT NULL DEFAULT 0,
+            target_daily_pnl REAL NOT NULL DEFAULT 0,
+            target_weekly_pnl REAL NOT NULL DEFAULT 0,
+            target_monthly_pnl REAL NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
@@ -249,6 +252,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "accounts", "user_id", "user_id INTEGER")
     ensure_column(conn, "trades", "user_id", "user_id INTEGER")
     ensure_column(conn, "trades", "image_path", "image_path TEXT")
+    ensure_column(conn, "user_targets", "target_daily_pnl", "target_daily_pnl REAL NOT NULL DEFAULT 0")
+    ensure_column(conn, "user_targets", "target_weekly_pnl", "target_weekly_pnl REAL NOT NULL DEFAULT 0")
+    ensure_column(conn, "user_targets", "target_monthly_pnl", "target_monthly_pnl REAL NOT NULL DEFAULT 0")
     migrate_accounts_table_if_needed(conn)
 
 
@@ -445,27 +451,64 @@ def save_user_theme_profile(conn: sqlite3.Connection, user_id: int, profile_name
     conn.commit()
 
 
-def get_user_target_pnl(conn: sqlite3.Connection, user_id: int) -> float:
+def get_user_pnl_targets(conn: sqlite3.Connection, user_id: int) -> dict:
     row = conn.execute(
-        "SELECT target_pnl FROM user_targets WHERE user_id = ?",
+        """
+        SELECT
+            target_pnl,
+            target_daily_pnl,
+            target_weekly_pnl,
+            target_monthly_pnl
+        FROM user_targets
+        WHERE user_id = ?
+        """,
         (user_id,),
     ).fetchone()
     if not row:
-        return 0.0
-    return float(row["target_pnl"])
+        return {"daily": 0.0, "weekly": 0.0, "monthly": 0.0}
+    daily = float(row["target_daily_pnl"] or 0.0)
+    weekly = float(row["target_weekly_pnl"] or 0.0)
+    monthly = float(row["target_monthly_pnl"] or 0.0)
+    legacy = float(row["target_pnl"] or 0.0)
+    if daily <= 0 and weekly <= 0 and monthly <= 0 and legacy > 0:
+        monthly = legacy
+    return {"daily": daily, "weekly": weekly, "monthly": monthly}
 
 
-def save_user_target_pnl(conn: sqlite3.Connection, user_id: int, target_pnl: float) -> None:
+def save_user_pnl_targets(
+    conn: sqlite3.Connection,
+    user_id: int,
+    daily: float,
+    weekly: float,
+    monthly: float,
+) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     conn.execute(
         """
-        INSERT INTO user_targets (user_id, target_pnl, updated_at)
-        VALUES (?, ?, ?)
+        INSERT INTO user_targets (
+            user_id,
+            target_pnl,
+            target_daily_pnl,
+            target_weekly_pnl,
+            target_monthly_pnl,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
             target_pnl = excluded.target_pnl,
+            target_daily_pnl = excluded.target_daily_pnl,
+            target_weekly_pnl = excluded.target_weekly_pnl,
+            target_monthly_pnl = excluded.target_monthly_pnl,
             updated_at = excluded.updated_at
         """,
-        (user_id, float(target_pnl), now),
+        (
+            user_id,
+            float(monthly),
+            float(daily),
+            float(weekly),
+            float(monthly),
+            now,
+        ),
     )
     conn.commit()
 
@@ -753,6 +796,7 @@ def update_trade(
     fees: float,
     tags: str,
     notes: str,
+    manual_net_pnl: float | None = None,
     new_image_path: str = "",
     clear_image: bool = False,
 ) -> bool:
@@ -764,7 +808,11 @@ def update_trade(
         return False
 
     old_image_path = row["image_path"] or ""
-    gross, net = calculate_pnl(side, quantity, entry_price, exit_price, fees)
+    if manual_net_pnl is not None:
+        net = float(manual_net_pnl)
+        gross = net + float(fees)
+    else:
+        gross, net = calculate_pnl(side, quantity, entry_price, exit_price, fees)
     final_image_path = old_image_path
     if new_image_path.strip():
         final_image_path = new_image_path.strip()
@@ -1910,88 +1958,116 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
     c6.metric("Account Balance", f"${m['account_balance']:,.2f}")
     c7.metric("Win Streak", m["win_streak"], delta=f"Best {m['best_win_streak']}")
 
-    p1, p2, p3 = st.columns(3)
-    p1.metric("Daily P&L", f"${p['daily']:,.2f}")
-    p2.metric("Weekly P&L", f"${p['weekly']:,.2f}")
-    p3.metric("Monthly P&L", f"${p['monthly']:,.2f}")
-
-    target_pnl = get_user_target_pnl(conn, user_id)
-    if target_pnl > 0:
-        scope_label = selected_dashboard_account
-        progress_raw = m["total_net"] / target_pnl if target_pnl else 0.0
-        progress_ratio = max(0.0, min(1.0, progress_raw))
-        progress_pct = max(0.0, progress_raw * 100)
-        progress_color = "#22c55e" if m["total_net"] >= 0 else "#ef4444"
-        status_text = (
-            f"${(target_pnl - m['total_net']):,.2f} left to target"
-            if m["total_net"] < target_pnl
-            else f"Target exceeded by ${max(0.0, m['total_net'] - target_pnl):,.2f}"
-        )
-        st.markdown(
-            f"""
-            <style>
-            .target-card {{
-                border: 1px solid color-mix(in srgb, {progress_color} 45%, #2a3346 55%);
-                border-radius: 12px;
-                padding: 10px 12px 12px 12px;
-                background: linear-gradient(180deg, rgba(18, 24, 38, 0.9), rgba(15, 20, 32, 0.95));
-                margin-top: 6px;
-                margin-bottom: 8px;
-            }}
-            .target-row {{
-                display: flex;
-                justify-content: space-between;
-                align-items: baseline;
-                gap: 10px;
-                margin-bottom: 7px;
-            }}
-            .target-title {{
-                font-size: 13px;
-                font-weight: 700;
-                letter-spacing: 0.2px;
-                color: #dce5f7;
-            }}
-            .target-numbers {{
-                font-size: 13px;
-                font-weight: 700;
-                color: #e9eefb;
-            }}
-            .target-track {{
-                width: 100%;
-                height: 10px;
-                border-radius: 999px;
-                background: #232a3b;
-                overflow: hidden;
-                border: 1px solid #344059;
-            }}
-            .target-fill {{
-                height: 100%;
-                width: {min(progress_pct, 100):.2f}%;
-                background: linear-gradient(90deg, color-mix(in srgb, {progress_color} 75%, #ffffff 25%), {progress_color});
-                transition: width 0.35s ease;
-            }}
-            .target-meta {{
-                margin-top: 6px;
-                display: flex;
-                justify-content: space-between;
-                font-size: 12px;
-                color: #a8b4ca;
-            }}
-            </style>
-            <div class="target-card">
-                <div class="target-row">
-                    <div class="target-title">Target P&L Progress ({scope_label})</div>
-                    <div class="target-numbers">${m['total_net']:,.2f} / ${target_pnl:,.2f}</div>
-                </div>
-                <div class="target-track"><div class="target-fill"></div></div>
-                <div class="target-meta">
-                    <span>{status_text}</span>
-                    <span>{progress_pct:.1f}%</span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    targets = get_user_pnl_targets(conn, user_id)
+    st.markdown(
+        """
+        <style>
+        .target-card-v2 {
+            border: 1px solid #2f3f66;
+            border-radius: 14px;
+            padding: 12px 14px;
+            background: linear-gradient(145deg, rgba(17, 24, 39, 0.95), rgba(12, 19, 32, 0.98));
+            box-shadow: 0 8px 26px rgba(4, 10, 20, 0.35);
+            margin-top: 6px;
+            margin-bottom: 10px;
+        }
+        .target-head-v2 {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .target-title-v2 {
+            font-size: 13px;
+            font-weight: 800;
+            letter-spacing: 0.25px;
+            color: #dce5f7;
+        }
+        .target-number-v2 {
+            font-size: 13px;
+            font-weight: 700;
+            color: #e9eefb;
+        }
+        .target-track-v2 {
+            width: 100%;
+            height: 10px;
+            border-radius: 999px;
+            background: #1c273f;
+            overflow: hidden;
+            border: 1px solid #2f3d5c;
+        }
+        .target-fill-v2 {
+            height: 100%;
+            transition: width 0.35s ease;
+        }
+        .target-meta-v2 {
+            margin-top: 7px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #a8b4ca;
+        }
+        .target-empty-v2 {
+            opacity: 0.85;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(f"P&L Target Progress ({selected_dashboard_account})")
+    tcols = st.columns(3)
+    target_specs = [
+        ("Daily", float(p["daily"]), float(targets["daily"])),
+        ("Weekly", float(p["weekly"]), float(targets["weekly"])),
+        ("Monthly", float(p["monthly"]), float(targets["monthly"])),
+    ]
+    for col, (label, current_value, target_value) in zip(tcols, target_specs):
+        with col:
+            if target_value <= 0:
+                st.markdown(
+                    f"""
+                    <div class="target-card-v2 target-empty-v2">
+                        <div class="target-head-v2">
+                            <div class="target-title-v2">{label} Target</div>
+                            <div class="target-number-v2">$0.00</div>
+                        </div>
+                        <div class="target-track-v2"><div class="target-fill-v2" style="width:0%;background:#42506e;"></div></div>
+                        <div class="target-meta-v2">
+                            <span>Set in Accounts tab</span>
+                            <span>0.0%</span>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                progress_raw = current_value / target_value
+                progress_pct = max(0.0, progress_raw * 100.0)
+                fill_color = "#22c55e" if current_value >= 0 else "#ef4444"
+                status_text = (
+                    f"${(target_value - current_value):,.2f} left"
+                    if current_value < target_value
+                    else f"+${max(0.0, current_value - target_value):,.2f} above"
+                )
+                st.markdown(
+                    f"""
+                    <div class="target-card-v2">
+                        <div class="target-head-v2">
+                            <div class="target-title-v2">{label} Target</div>
+                            <div class="target-number-v2">${current_value:,.2f} / ${target_value:,.2f}</div>
+                        </div>
+                        <div class="target-track-v2">
+                            <div class="target-fill-v2" style="width:{min(progress_pct, 100):.2f}%;background:linear-gradient(90deg,color-mix(in srgb,{fill_color} 70%,#ffffff 30%),{fill_color});"></div>
+                        </div>
+                        <div class="target-meta-v2">
+                            <span>{status_text}</span>
+                            <span>{progress_pct:.1f}%</span>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
     tab1, tab2, tab3, tab4 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts"])
 
@@ -2047,7 +2123,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
             fees = col_f.number_input("Fees", min_value=0.0, value=0.0, step=0.01, key="trade_fees_input")
 
             col_g, col_h = st.columns(2)
-            manual_pnl_mode = st.checkbox("Add a P&NL", value=False, key="trade_manual_pnl_mode")
+            manual_pnl_mode = st.checkbox("Add a P&L", value=False, key="trade_manual_pnl_mode")
             entry_price = col_g.number_input(
                 "Entry Price",
                 min_value=0.0,
@@ -2280,6 +2356,12 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     st.session_state["edit_trade_entry"] = float(edit_row["entry_price"])
                     st.session_state["edit_trade_exit"] = float(edit_row["exit_price"])
                     st.session_state["edit_trade_fees"] = float(edit_row["fees"])
+                    st.session_state["edit_trade_manual_pnl_mode"] = (
+                        float(edit_row["entry_price"]) == 0.0 and float(edit_row["exit_price"]) == 0.0
+                    )
+                    st.session_state["edit_trade_manual_net_pnl"] = (
+                        float(edit_row["net_pnl"]) if st.session_state["edit_trade_manual_pnl_mode"] else 0.0
+                    )
                     st.session_state["edit_trade_tags"] = str(edit_row["tags"] or "")
                     st.session_state["edit_trade_notes"] = str(edit_row["notes"] or "")
                     st.session_state["pending_edit_pasted_image_bytes"] = None
@@ -2304,12 +2386,32 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 edit_fees = e6.number_input("Edit Fees", min_value=0.0, step=0.01, key="edit_trade_fees")
 
                 e7, e8 = st.columns(2)
+                edit_manual_pnl_mode = st.checkbox(
+                    "Use manual P&L",
+                    key="edit_trade_manual_pnl_mode",
+                )
                 edit_entry = e7.number_input(
-                    "Edit Entry Price", min_value=0.0, step=0.01, key="edit_trade_entry"
+                    "Edit Entry Price",
+                    min_value=0.0,
+                    step=0.01,
+                    key="edit_trade_entry",
+                    disabled=edit_manual_pnl_mode,
                 )
                 edit_exit = e8.number_input(
-                    "Edit Exit Price", min_value=0.0, step=0.01, key="edit_trade_exit"
+                    "Edit Exit Price",
+                    min_value=0.0,
+                    step=0.01,
+                    key="edit_trade_exit",
+                    disabled=edit_manual_pnl_mode,
                 )
+                edit_manual_net_pnl = None
+                if edit_manual_pnl_mode:
+                    edit_manual_net_pnl = st.number_input(
+                        "Manual Net P&L",
+                        value=float(st.session_state.get("edit_trade_manual_net_pnl", 0.0)),
+                        step=0.01,
+                        key="edit_trade_manual_net_pnl",
+                    )
 
                 edit_tags = st.text_input("Edit Tags", key="edit_trade_tags")
                 edit_notes = st.text_area("Edit Notes", key="edit_trade_notes")
@@ -2362,7 +2464,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                         st.warning("Symbol is required.")
                     elif edit_qty <= 0:
                         st.warning("Quantity must be greater than 0.")
-                    elif edit_entry <= 0 or edit_exit <= 0:
+                    elif (not edit_manual_pnl_mode) and (edit_entry <= 0 or edit_exit <= 0):
                         st.warning("Entry and exit price must be greater than 0.")
                     else:
                         try:
@@ -2383,11 +2485,12 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                                 symbol=edit_symbol,
                                 side=edit_side,
                                 quantity=float(edit_qty),
-                                entry_price=float(edit_entry),
-                                exit_price=float(edit_exit),
+                                entry_price=float(edit_entry) if not edit_manual_pnl_mode else 0.0,
+                                exit_price=float(edit_exit) if not edit_manual_pnl_mode else 0.0,
                                 fees=float(edit_fees),
                                 tags=edit_tags,
                                 notes=edit_notes,
+                                manual_net_pnl=float(edit_manual_net_pnl) if edit_manual_pnl_mode else None,
                                 new_image_path=new_image_path,
                                 clear_image=clear_existing_image,
                             )
@@ -2469,23 +2572,42 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 hide_index=True,
             )
 
-        st.markdown("Target P&L")
+        st.markdown("P&L Targets")
+        current_targets = get_user_pnl_targets(conn, user_id)
         with st.form("target_pnl_form", clear_on_submit=False):
-            target_input = st.number_input(
-                "Set Target P&L",
+            t1, t2, t3 = st.columns(3)
+            target_daily_input = t1.number_input(
+                "Daily Target",
                 min_value=0.0,
-                value=float(get_user_target_pnl(conn, user_id)),
-                step=50.0,
-                help="Dashboard will show progress toward this target.",
+                value=float(current_targets["daily"]),
+                step=10.0,
             )
-            target_submitted = st.form_submit_button("Save Target")
+            target_weekly_input = t2.number_input(
+                "Weekly Target",
+                min_value=0.0,
+                value=float(current_targets["weekly"]),
+                step=25.0,
+            )
+            target_monthly_input = t3.number_input(
+                "Monthly Target",
+                min_value=0.0,
+                value=float(current_targets["monthly"]),
+                step=50.0,
+            )
+            target_submitted = st.form_submit_button("Save Targets")
             if target_submitted:
                 try:
-                    save_user_target_pnl(conn, user_id, float(target_input))
-                    st.success("Target P&L saved.")
+                    save_user_pnl_targets(
+                        conn,
+                        user_id,
+                        float(target_daily_input),
+                        float(target_weekly_input),
+                        float(target_monthly_input),
+                    )
+                    st.success("P&L targets saved.")
                     st.rerun()
                 except Exception as exc:
-                    report_exception("Save target P&L failed", exc)
+                    report_exception("Save P&L targets failed", exc)
 
         st.markdown("Add account")
         with st.form("account_form", clear_on_submit=True):

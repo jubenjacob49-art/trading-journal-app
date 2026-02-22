@@ -7,7 +7,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -168,6 +168,18 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS remember_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        """
+    )
     conn.commit()
 
     # Backward compatibility for existing DBs created before auth.
@@ -235,6 +247,55 @@ def authenticate_user(conn: sqlite3.Connection, username: str, password: str) ->
     if candidate_hash != row["password_hash"]:
         return False, "Invalid username or password.", None
     return True, "Login successful.", int(row["id"])
+
+
+def create_remember_token(conn: sqlite3.Connection, user_id: int, days_valid: int = 30) -> str:
+    raw = f"{uuid.uuid4().hex}{uuid.uuid4().hex}"
+    token_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    now = datetime.now()
+    expires = now + timedelta(days=days_valid)
+    conn.execute(
+        """
+        INSERT INTO remember_tokens (user_id, token_hash, expires_at, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (user_id, token_hash, expires.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    return raw
+
+
+def authenticate_with_remember_token(
+    conn: sqlite3.Connection, raw_token: str
+) -> tuple[bool, int | None, str | None]:
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    row = conn.execute(
+        """
+        SELECT rt.user_id, rt.expires_at, u.username
+        FROM remember_tokens rt
+        JOIN users u ON u.id = rt.user_id
+        WHERE rt.token_hash = ?
+        """,
+        (token_hash,),
+    ).fetchone()
+    if not row:
+        return False, None, None
+
+    expires_at = datetime.fromisoformat(row["expires_at"])
+    if expires_at < datetime.now():
+        conn.execute("DELETE FROM remember_tokens WHERE token_hash = ?", (token_hash,))
+        conn.commit()
+        return False, None, None
+
+    return True, int(row["user_id"]), str(row["username"])
+
+
+def revoke_remember_token(conn: sqlite3.Connection, raw_token: str | None) -> None:
+    if not raw_token:
+        return
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    conn.execute("DELETE FROM remember_tokens WHERE token_hash = ?", (token_hash,))
+    conn.commit()
 
 
 def get_accounts(conn: sqlite3.Connection, user_id: int) -> pd.DataFrame:
@@ -1109,6 +1170,7 @@ def render_login_page(conn: sqlite3.Connection) -> None:
             with st.form("login_form"):
                 username = st.text_input("Username", placeholder="Enter your username")
                 password = st.text_input("Password", type="password", placeholder="Enter your password")
+                remember_me = st.checkbox("Remember me for 30 days", value=False)
                 submitted = st.form_submit_button("Sign In", use_container_width=True)
                 if submitted:
                     ok, msg, user_id = authenticate_user(conn, username, password)
@@ -1116,6 +1178,14 @@ def render_login_page(conn: sqlite3.Connection) -> None:
                         st.session_state["auth_user_id"] = user_id
                         st.session_state["auth_username"] = username.strip()
                         st.session_state["show_welcome_once"] = True
+                        if remember_me:
+                            raw_token = create_remember_token(conn, user_id, days_valid=30)
+                            st.session_state["remember_token"] = raw_token
+                            st.query_params["rt"] = raw_token
+                        else:
+                            st.session_state["remember_token"] = None
+                            if "rt" in st.query_params:
+                                del st.query_params["rt"]
                         st.success(msg)
                         navigate_to("app")
                     else:
@@ -1232,8 +1302,12 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
     with st.sidebar:
         st.markdown(f"**User:** {st.session_state.get('auth_username', 'Unknown')}")
         if st.button("Logout", use_container_width=True):
+            revoke_remember_token(conn, st.session_state.get("remember_token"))
             st.session_state["auth_user_id"] = None
             st.session_state["auth_username"] = None
+            st.session_state["remember_token"] = None
+            if "rt" in st.query_params:
+                del st.query_params["rt"]
             navigate_to("landing")
 
     accounts_df = get_accounts(conn, user_id)
@@ -1643,6 +1717,8 @@ def init_session_state() -> None:
         st.session_state["pending_transition_animation"] = None
     if "show_welcome_once" not in st.session_state:
         st.session_state["show_welcome_once"] = False
+    if "remember_token" not in st.session_state:
+        st.session_state["remember_token"] = None
 
 
 def main() -> None:
@@ -1652,6 +1728,19 @@ def main() -> None:
     init_session_state()
     inject_responsive_css()
     apply_pending_transition()
+
+    if not st.session_state["auth_user_id"] and "rt" in st.query_params:
+        raw_token = str(st.query_params.get("rt", "")).strip()
+        if raw_token:
+            ok, user_id, username = authenticate_with_remember_token(conn, raw_token)
+            if ok and user_id is not None and username:
+                st.session_state["auth_user_id"] = user_id
+                st.session_state["auth_username"] = username
+                st.session_state["remember_token"] = raw_token
+                st.session_state["page"] = "app"
+            else:
+                if "rt" in st.query_params:
+                    del st.query_params["rt"]
 
     if st.session_state["auth_user_id"]:
         st.session_state["page"] = "app"

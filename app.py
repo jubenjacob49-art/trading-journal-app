@@ -1663,6 +1663,17 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
         st.session_state["theme_last_preset"] = "Midnight"
         st.session_state["theme_reset_requested"] = False
 
+    pending_theme = st.session_state.get("theme_profile_pending_load")
+    if isinstance(pending_theme, dict):
+        st.session_state["theme_name"] = "Custom"
+        st.session_state["theme_bg_color"] = pending_theme["bg_color"]
+        st.session_state["theme_surface_color"] = pending_theme["surface_color"]
+        st.session_state["theme_text_color"] = pending_theme["text_color"]
+        st.session_state["theme_accent_color"] = pending_theme["accent_color"]
+        st.session_state["theme_preset_select"] = "Custom"
+        st.session_state["theme_last_preset"] = "Custom"
+        st.session_state["theme_profile_pending_load"] = None
+
     active_theme = {
         "theme_name": st.session_state.get("theme_name", "Midnight"),
         "bg_color": st.session_state.get("theme_bg_color", THEME_PRESETS["Midnight"]["bg_color"]),
@@ -1795,18 +1806,15 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                         if not loaded:
                             st.warning("Theme profile not found.")
                         else:
-                            st.session_state["theme_name"] = "Custom"
-                            st.session_state["theme_bg_color"] = loaded["bg_color"]
-                            st.session_state["theme_surface_color"] = loaded["surface_color"]
-                            st.session_state["theme_text_color"] = loaded["text_color"]
-                            st.session_state["theme_accent_color"] = loaded["accent_color"]
-                            st.session_state["theme_preset_select"] = "Custom"
-                            st.session_state["theme_last_preset"] = "Custom"
+                            st.session_state["theme_profile_pending_load"] = loaded
                             save_user_theme(conn, user_id, loaded)
-                            st.success(f"Loaded profile '{selected_profile}'.")
+                            st.session_state["theme_loaded_notice"] = f"Loaded profile '{selected_profile}'."
                             st.rerun()
                     except Exception as exc:
                         report_exception("Load theme profile failed", exc)
+            if st.session_state.get("theme_loaded_notice"):
+                st.success(st.session_state["theme_loaded_notice"])
+                st.session_state["theme_loaded_notice"] = None
         if st.button("Logout", use_container_width=True):
             try:
                 revoke_remember_token(conn, st.session_state.get("remember_token"))
@@ -1994,6 +2002,11 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                         save_trade(conn, user_id, trade_input)
                         st.session_state["pending_trade_pasted_image_bytes"] = None
                         st.session_state["paste_widget_version"] = st.session_state.get("paste_widget_version", 0) + 1
+                        st.session_state["trade_symbol_input"] = ""
+                        st.session_state["trade_symbol_prefill"] = None
+                        st.session_state["trade_recent_symbol_version"] = (
+                            st.session_state.get("trade_recent_symbol_version", 0) + 1
+                        )
                         st.success("Trade saved.")
                         st.rerun()
                     except Exception as exc:
@@ -2445,6 +2458,10 @@ def init_session_state() -> None:
         st.session_state["theme_reset_requested"] = False
     if "trade_recent_symbol_version" not in st.session_state:
         st.session_state["trade_recent_symbol_version"] = 0
+    if "theme_profile_pending_load" not in st.session_state:
+        st.session_state["theme_profile_pending_load"] = None
+    if "theme_loaded_notice" not in st.session_state:
+        st.session_state["theme_loaded_notice"] = None
 
 
 def main() -> None:

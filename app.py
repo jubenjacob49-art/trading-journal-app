@@ -236,7 +236,6 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
 
-    # Backward compatibility for existing DBs created before auth.
     ensure_column(conn, "accounts", "user_id", "user_id INTEGER")
     ensure_column(conn, "trades", "user_id", "user_id INTEGER")
     ensure_column(conn, "trades", "image_path", "image_path TEXT")
@@ -1872,6 +1871,24 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 "Quantity", min_value=0.0, value=1.0, step=1.0, key="trade_qty_input"
             )
             fees = col_f.number_input("Fees", min_value=0.0, value=0.0, step=0.01, key="trade_fees_input")
+
+            recent_symbols = []
+            if not trades_df.empty and "symbol" in trades_df.columns:
+                recent_symbols = list(
+                    dict.fromkeys(
+                        trades_df["symbol"].dropna().astype(str).str.upper().tolist()
+                    )
+                )[:10]
+            if recent_symbols:
+                recent_choice = st.selectbox(
+                    "Recently Used Symbols",
+                    options=["Select..."] + recent_symbols,
+                    key="trade_recent_symbol_select",
+                )
+                if recent_choice != "Select...":
+                    st.session_state["trade_symbol_input"] = recent_choice
+                    st.session_state["trade_recent_symbol_select"] = "Select..."
+                    st.rerun()
 
             col_g, col_h = st.columns(2)
             manual_pnl_mode = st.checkbox("Add a P&NL", value=False, key="trade_manual_pnl_mode")

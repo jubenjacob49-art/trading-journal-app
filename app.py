@@ -1613,7 +1613,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
     with st.sidebar:
         st.markdown(f"**User:** {st.session_state.get('auth_username', 'Unknown')}")
         st.toggle("Debug Mode", key="debug_mode")
-        with st.expander("Themes", expanded=False):
+        with st.popover("Themes", use_container_width=True):
             saved_profiles = list_user_theme_profiles(conn, user_id)
             st.caption(f"Active: {st.session_state.get('theme_name', 'Custom')}")
 

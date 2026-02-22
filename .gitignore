@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+trading_journal.db
+trade_images/
+.DS_Store
+Thumbs.db

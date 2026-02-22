@@ -64,6 +64,7 @@ class TradeInput:
     tags: str
     notes: str
     image_path: str
+    manual_net_pnl: float | None = None
 
 
 def get_conn() -> sqlite3.Connection:
@@ -666,9 +667,13 @@ def get_next_available_trade_id(conn: sqlite3.Connection) -> int:
 
 
 def save_trade(conn: sqlite3.Connection, user_id: int, trade: TradeInput) -> None:
-    gross, net = calculate_pnl(
-        trade.side, trade.quantity, trade.entry_price, trade.exit_price, trade.fees
-    )
+    if trade.manual_net_pnl is not None:
+        net = float(trade.manual_net_pnl)
+        gross = net + float(trade.fees)
+    else:
+        gross, net = calculate_pnl(
+            trade.side, trade.quantity, trade.entry_price, trade.exit_price, trade.fees
+        )
     now = datetime.now().isoformat(timespec="seconds")
     next_trade_id = get_next_available_trade_id(conn)
     conn.execute(
@@ -1869,12 +1874,32 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
             fees = col_f.number_input("Fees", min_value=0.0, value=0.0, step=0.01, key="trade_fees_input")
 
             col_g, col_h = st.columns(2)
+            manual_pnl_mode = st.checkbox("Add a P&NL", value=False, key="trade_manual_pnl_mode")
             entry_price = col_g.number_input(
-                "Entry Price", min_value=0.0, value=0.0, step=0.01, key="trade_entry_input"
+                "Entry Price",
+                min_value=0.0,
+                value=0.0,
+                step=0.01,
+                key="trade_entry_input",
+                disabled=manual_pnl_mode,
             )
             exit_price = col_h.number_input(
-                "Exit Price", min_value=0.0, value=0.0, step=0.01, key="trade_exit_input"
+                "Exit Price",
+                min_value=0.0,
+                value=0.0,
+                step=0.01,
+                key="trade_exit_input",
+                disabled=manual_pnl_mode,
             )
+            manual_net_pnl = None
+            if manual_pnl_mode:
+                manual_net_pnl = st.number_input(
+                    "Net P&L",
+                    value=0.0,
+                    step=0.01,
+                    key="trade_manual_net_pnl",
+                    help="Used when Entry/Exit are disabled.",
+                )
 
             tags = st.text_input("Tags", placeholder="breakout, earnings, setup-A", key="trade_tags_input")
             notes = st.text_area(
@@ -1918,7 +1943,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     st.warning("Symbol is required.")
                 elif quantity <= 0:
                     st.warning("Quantity must be greater than 0.")
-                elif entry_price <= 0 or exit_price <= 0:
+                elif (not manual_pnl_mode) and (entry_price <= 0 or exit_price <= 0):
                     st.warning("Entry and exit price must be greater than 0.")
                 else:
                     try:
@@ -1934,12 +1959,13 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                             symbol=symbol,
                             side=side,
                             quantity=float(quantity),
-                            entry_price=float(entry_price),
-                            exit_price=float(exit_price),
+                            entry_price=float(entry_price) if not manual_pnl_mode else 0.0,
+                            exit_price=float(exit_price) if not manual_pnl_mode else 0.0,
                             fees=float(fees),
                             tags=tags,
                             notes=notes,
                             image_path=image_path,
+                            manual_net_pnl=float(manual_net_pnl) if manual_pnl_mode else None,
                         )
                         save_trade(conn, user_id, trade_input)
                         st.session_state["pending_trade_pasted_image_bytes"] = None

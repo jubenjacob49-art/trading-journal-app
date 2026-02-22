@@ -1873,14 +1873,17 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     )
                 )[:10]
             if recent_symbols:
+                recent_key = f"trade_recent_symbol_select_{st.session_state.get('trade_recent_symbol_version', 0)}"
                 recent_choice = st.selectbox(
                     "Recently Used Symbols",
                     options=["Select..."] + recent_symbols,
-                    key="trade_recent_symbol_select",
+                    key=recent_key,
                 )
                 if recent_choice != "Select...":
                     st.session_state["trade_symbol_prefill"] = recent_choice
-                    st.session_state["trade_recent_symbol_select"] = "Select..."
+                    st.session_state["trade_recent_symbol_version"] = (
+                        st.session_state.get("trade_recent_symbol_version", 0) + 1
+                    )
                     st.rerun()
 
             if st.session_state.get("trade_symbol_prefill"):
@@ -2440,6 +2443,8 @@ def init_session_state() -> None:
         st.session_state["debug_mode"] = DEBUG_DEFAULT
     if "theme_reset_requested" not in st.session_state:
         st.session_state["theme_reset_requested"] = False
+    if "trade_recent_symbol_version" not in st.session_state:
+        st.session_state["trade_recent_symbol_version"] = 0
 
 
 def main() -> None:

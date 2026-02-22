@@ -1894,6 +1894,11 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     )
                     st.rerun()
 
+            if st.session_state.get("trade_symbol_clear_requested"):
+                st.session_state["trade_symbol_input"] = ""
+                st.session_state["trade_symbol_prefill"] = None
+                st.session_state["trade_symbol_clear_requested"] = False
+
             if st.session_state.get("trade_symbol_prefill"):
                 st.session_state["trade_symbol_input"] = st.session_state["trade_symbol_prefill"]
                 st.session_state["trade_symbol_prefill"] = None
@@ -2002,8 +2007,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                         save_trade(conn, user_id, trade_input)
                         st.session_state["pending_trade_pasted_image_bytes"] = None
                         st.session_state["paste_widget_version"] = st.session_state.get("paste_widget_version", 0) + 1
-                        st.session_state["trade_symbol_input"] = ""
-                        st.session_state["trade_symbol_prefill"] = None
+                        st.session_state["trade_symbol_clear_requested"] = True
                         st.session_state["trade_recent_symbol_version"] = (
                             st.session_state.get("trade_recent_symbol_version", 0) + 1
                         )
@@ -2458,6 +2462,8 @@ def init_session_state() -> None:
         st.session_state["theme_reset_requested"] = False
     if "trade_recent_symbol_version" not in st.session_state:
         st.session_state["trade_recent_symbol_version"] = 0
+    if "trade_symbol_clear_requested" not in st.session_state:
+        st.session_state["trade_symbol_clear_requested"] = False
     if "theme_profile_pending_load" not in st.session_state:
         st.session_state["theme_profile_pending_load"] = None
     if "theme_loaded_notice" not in st.session_state:

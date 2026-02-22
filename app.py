@@ -3,8 +3,10 @@ import base64
 import io
 import mimetypes
 import hashlib
+import os
 import sqlite3
 import time
+import traceback
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -26,6 +28,7 @@ LOGO_CANDIDATES = [
     Path("assets/logo.jpg"),
 ]
 PAGE_ORDER = {"landing": 0, "login": 1, "register": 2, "app": 3}
+DEBUG_DEFAULT = os.getenv("APP_DEBUG", "0").strip() == "1"
 
 
 @dataclass
@@ -411,6 +414,76 @@ def save_trade(conn: sqlite3.Connection, user_id: int, trade: TradeInput) -> Non
     conn.commit()
 
 
+def update_trade(
+    conn: sqlite3.Connection,
+    user_id: int,
+    trade_id: int,
+    trade_date: str,
+    account_id: int,
+    symbol: str,
+    side: str,
+    quantity: float,
+    entry_price: float,
+    exit_price: float,
+    fees: float,
+    tags: str,
+    notes: str,
+    new_image_path: str = "",
+    clear_image: bool = False,
+) -> bool:
+    row = conn.execute(
+        "SELECT image_path FROM trades WHERE id = ? AND user_id = ?",
+        (trade_id, user_id),
+    ).fetchone()
+    if not row:
+        return False
+
+    old_image_path = row["image_path"] or ""
+    gross, net = calculate_pnl(side, quantity, entry_price, exit_price, fees)
+    final_image_path = old_image_path
+    if new_image_path.strip():
+        final_image_path = new_image_path.strip()
+        if old_image_path and old_image_path != final_image_path:
+            old_file = Path(old_image_path)
+            if old_file.exists():
+                old_file.unlink(missing_ok=True)
+    elif clear_image:
+        final_image_path = ""
+        if old_image_path:
+            old_file = Path(old_image_path)
+            if old_file.exists():
+                old_file.unlink(missing_ok=True)
+
+    result = conn.execute(
+        """
+        UPDATE trades
+        SET trade_date = ?, account_id = ?, symbol = ?, side = ?, quantity = ?,
+            entry_price = ?, exit_price = ?, fees = ?, gross_pnl = ?, net_pnl = ?,
+            tags = ?, notes = ?, image_path = ?
+        WHERE id = ? AND user_id = ?
+        """,
+        (
+            trade_date,
+            account_id,
+            symbol.upper().strip(),
+            side,
+            quantity,
+            entry_price,
+            exit_price,
+            fees,
+            gross,
+            net,
+            tags.strip(),
+            notes.strip(),
+            final_image_path,
+            trade_id,
+            user_id,
+        ),
+    )
+    conn.commit()
+    return result.rowcount > 0
+
+
 def add_account(
     conn: sqlite3.Connection,
     user_id: int,
@@ -727,6 +800,13 @@ def navigate_to(page: str) -> None:
     st.session_state["pending_transition_animation"] = get_transition_animation(current_page, page)
     st.session_state["page"] = page
     st.rerun()
+
+
+def report_exception(context: str, exc: Exception) -> None:
+    st.error(f"{context}: {exc}")
+    if st.session_state.get("debug_mode", False):
+        st.exception(exc)
+        st.code(traceback.format_exc(), language="text")
 
 
 def apply_pending_transition() -> None:
@@ -1301,14 +1381,18 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
 
     with st.sidebar:
         st.markdown(f"**User:** {st.session_state.get('auth_username', 'Unknown')}")
+        st.toggle("Debug Mode", key="debug_mode")
         if st.button("Logout", use_container_width=True):
-            revoke_remember_token(conn, st.session_state.get("remember_token"))
-            st.session_state["auth_user_id"] = None
-            st.session_state["auth_username"] = None
-            st.session_state["remember_token"] = None
-            if "rt" in st.query_params:
-                del st.query_params["rt"]
-            navigate_to("landing")
+            try:
+                revoke_remember_token(conn, st.session_state.get("remember_token"))
+                st.session_state["auth_user_id"] = None
+                st.session_state["auth_username"] = None
+                st.session_state["remember_token"] = None
+                if "rt" in st.query_params:
+                    del st.query_params["rt"]
+                navigate_to("landing")
+            except Exception as exc:
+                report_exception("Logout failed", exc)
 
     accounts_df = get_accounts(conn, user_id)
     trades_df = get_trades(conn, user_id)
@@ -1416,30 +1500,33 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 elif entry_price <= 0 or exit_price <= 0:
                     st.warning("Entry and exit price must be greater than 0.")
                 else:
-                    image_path = save_trade_image(
-                        trade_image,
-                        user_id=user_id,
-                        pasted_image_bytes=st.session_state.get("pending_trade_pasted_image_bytes"),
-                    )
-                    account_id = int(accounts_df.loc[accounts_df["name"] == account_name, "id"].iloc[0])
-                    trade_input = TradeInput(
-                        trade_date=str(trade_date),
-                        account_id=account_id,
-                        symbol=symbol,
-                        side=side,
-                        quantity=float(quantity),
-                        entry_price=float(entry_price),
-                        exit_price=float(exit_price),
-                        fees=float(fees),
-                        tags=tags,
-                        notes=notes,
-                        image_path=image_path,
-                    )
-                    save_trade(conn, user_id, trade_input)
-                    st.session_state["pending_trade_pasted_image_bytes"] = None
-                    st.session_state["paste_widget_version"] = st.session_state.get("paste_widget_version", 0) + 1
-                    st.success("Trade saved.")
-                    st.rerun()
+                    try:
+                        image_path = save_trade_image(
+                            trade_image,
+                            user_id=user_id,
+                            pasted_image_bytes=st.session_state.get("pending_trade_pasted_image_bytes"),
+                        )
+                        account_id = int(accounts_df.loc[accounts_df["name"] == account_name, "id"].iloc[0])
+                        trade_input = TradeInput(
+                            trade_date=str(trade_date),
+                            account_id=account_id,
+                            symbol=symbol,
+                            side=side,
+                            quantity=float(quantity),
+                            entry_price=float(entry_price),
+                            exit_price=float(exit_price),
+                            fees=float(fees),
+                            tags=tags,
+                            notes=notes,
+                            image_path=image_path,
+                        )
+                        save_trade(conn, user_id, trade_input)
+                        st.session_state["pending_trade_pasted_image_bytes"] = None
+                        st.session_state["paste_widget_version"] = st.session_state.get("paste_widget_version", 0) + 1
+                        st.success("Trade saved.")
+                        st.rerun()
+                    except Exception as exc:
+                        report_exception("Save trade failed", exc)
 
     with tab2:
         st.subheader("Trade Journal")
@@ -1521,12 +1608,15 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 if not confirm_delete_trade:
                     st.warning("Tick confirm before deleting trade.")
                 else:
-                    deleted = delete_trade(conn, int(trade_id_delete), user_id)
-                    if deleted:
-                        st.success(f"Deleted trade {trade_id_delete}.")
-                    else:
-                        st.warning("Trade not found for this account.")
-                    st.rerun()
+                    try:
+                        deleted = delete_trade(conn, int(trade_id_delete), user_id)
+                        if deleted:
+                            st.success(f"Deleted trade {trade_id_delete}.")
+                        else:
+                            st.warning("Trade not found for this account.")
+                        st.rerun()
+                    except Exception as exc:
+                        report_exception("Delete trade failed", exc)
 
             if not filtered.empty:
                 chart_df = (
@@ -1541,6 +1631,153 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     markers=True,
                 )
                 st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("Edit trade")
+            if not trades_df.empty:
+                edit_options = [
+                    f"#{int(row['id'])} | {row['trade_date']} | {row['symbol']} | {row['account_name']}"
+                    for _, row in trades_df.iterrows()
+                ]
+                selected_edit = st.selectbox(
+                    "Select trade to edit",
+                    options=edit_options,
+                    key="edit_trade_select",
+                )
+                edit_trade_id = int(selected_edit.split("|")[0].replace("#", "").strip())
+                edit_row = trades_df[trades_df["id"] == edit_trade_id].iloc[0]
+
+                if st.session_state.get("edit_trade_loaded_id") != edit_trade_id:
+                    st.session_state["edit_trade_loaded_id"] = edit_trade_id
+                    st.session_state["edit_trade_date"] = pd.to_datetime(edit_row["trade_date"]).date()
+                    st.session_state["edit_trade_account_name"] = edit_row["account_name"]
+                    st.session_state["edit_trade_side"] = edit_row["side"]
+                    st.session_state["edit_trade_symbol"] = str(edit_row["symbol"])
+                    st.session_state["edit_trade_qty"] = float(edit_row["quantity"])
+                    st.session_state["edit_trade_entry"] = float(edit_row["entry_price"])
+                    st.session_state["edit_trade_exit"] = float(edit_row["exit_price"])
+                    st.session_state["edit_trade_fees"] = float(edit_row["fees"])
+                    st.session_state["edit_trade_tags"] = str(edit_row["tags"] or "")
+                    st.session_state["edit_trade_notes"] = str(edit_row["notes"] or "")
+                    st.session_state["pending_edit_pasted_image_bytes"] = None
+                    st.session_state["edit_paste_widget_version"] = st.session_state.get(
+                        "edit_paste_widget_version", 0
+                    ) + 1
+
+                e1, e2, e3 = st.columns(3)
+                edit_date = e1.date_input("Edit Date", key="edit_trade_date")
+                edit_account_name = e2.selectbox(
+                    "Edit Account",
+                    options=accounts_df["name"].tolist(),
+                    key="edit_trade_account_name",
+                )
+                edit_side = e3.selectbox("Edit Side", options=["Long", "Short"], key="edit_trade_side")
+
+                e4, e5, e6 = st.columns(3)
+                edit_symbol = e4.text_input("Edit Symbol", key="edit_trade_symbol")
+                edit_qty = e5.number_input(
+                    "Edit Quantity", min_value=0.0, step=1.0, key="edit_trade_qty"
+                )
+                edit_fees = e6.number_input("Edit Fees", min_value=0.0, step=0.01, key="edit_trade_fees")
+
+                e7, e8 = st.columns(2)
+                edit_entry = e7.number_input(
+                    "Edit Entry Price", min_value=0.0, step=0.01, key="edit_trade_entry"
+                )
+                edit_exit = e8.number_input(
+                    "Edit Exit Price", min_value=0.0, step=0.01, key="edit_trade_exit"
+                )
+
+                edit_tags = st.text_input("Edit Tags", key="edit_trade_tags")
+                edit_notes = st.text_area("Edit Notes", key="edit_trade_notes")
+
+                current_image_path = str(edit_row["image_path"] or "")
+                if current_image_path and Path(current_image_path).exists():
+                    st.caption("Current image")
+                    st.image(current_image_path, width=180)
+
+                edit_paste_key = f"edit_paste_trade_image_{st.session_state.get('edit_paste_widget_version', 0)}"
+                edit_pasted_result = paste_image_button("Paste New Image", key=edit_paste_key)
+                pending_edit_pasted = st.session_state.get("pending_edit_pasted_image_bytes")
+                if edit_pasted_result.image_data is not None:
+                    if pending_edit_pasted is None:
+                        edit_buf = io.BytesIO()
+                        edit_pasted_result.image_data.save(edit_buf, format="PNG")
+                        st.session_state["pending_edit_pasted_image_bytes"] = edit_buf.getvalue()
+                        pending_edit_pasted = st.session_state["pending_edit_pasted_image_bytes"]
+                    else:
+                        st.info("You already pasted an image for edit. Click x to replace it.")
+
+                edit_upload = st.file_uploader(
+                    "Upload New Image (optional)",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    accept_multiple_files=False,
+                    key="edit_trade_image_upload",
+                )
+
+                if pending_edit_pasted:
+                    st.caption("New pasted image preview")
+                    ep1, ep2 = st.columns([20, 1])
+                    with ep2:
+                        if st.button("x", key="clear_edit_pasted_image_btn", help="Remove pasted image"):
+                            st.session_state["pending_edit_pasted_image_bytes"] = None
+                            st.session_state["edit_paste_widget_version"] = st.session_state.get(
+                                "edit_paste_widget_version", 0
+                            ) + 1
+                            st.rerun()
+                    with ep1:
+                        st.image(pending_edit_pasted, width=180)
+
+                clear_existing_image = st.checkbox(
+                    "Remove current image",
+                    value=False,
+                    key="edit_trade_clear_existing_image",
+                )
+
+                if st.button("Save Trade Changes", key="save_trade_changes_btn", type="primary"):
+                    if not edit_symbol.strip():
+                        st.warning("Symbol is required.")
+                    elif edit_qty <= 0:
+                        st.warning("Quantity must be greater than 0.")
+                    elif edit_entry <= 0 or edit_exit <= 0:
+                        st.warning("Entry and exit price must be greater than 0.")
+                    else:
+                        try:
+                            new_image_path = save_trade_image(
+                                edit_upload,
+                                user_id=user_id,
+                                pasted_image_bytes=st.session_state.get("pending_edit_pasted_image_bytes"),
+                            )
+                            edit_account_id = int(
+                                accounts_df.loc[accounts_df["name"] == edit_account_name, "id"].iloc[0]
+                            )
+                            updated = update_trade(
+                                conn=conn,
+                                user_id=user_id,
+                                trade_id=edit_trade_id,
+                                trade_date=str(edit_date),
+                                account_id=edit_account_id,
+                                symbol=edit_symbol,
+                                side=edit_side,
+                                quantity=float(edit_qty),
+                                entry_price=float(edit_entry),
+                                exit_price=float(edit_exit),
+                                fees=float(edit_fees),
+                                tags=edit_tags,
+                                notes=edit_notes,
+                                new_image_path=new_image_path,
+                                clear_image=clear_existing_image,
+                            )
+                            if updated:
+                                st.session_state["pending_edit_pasted_image_bytes"] = None
+                                st.session_state["edit_paste_widget_version"] = st.session_state.get(
+                                    "edit_paste_widget_version", 0
+                                ) + 1
+                                st.success(f"Updated trade {edit_trade_id}.")
+                                st.rerun()
+                            else:
+                                st.warning("Trade not found for this account.")
+                        except Exception as exc:
+                            report_exception("Update trade failed", exc)
 
     with tab3:
         current = date.today()
@@ -1644,20 +1881,23 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 note = st.text_input("Note", placeholder="Funding, payout, transfer, etc.")
                 cash_submitted = st.form_submit_button("Save Transfer")
                 if cash_submitted:
-                    account_id = int(
-                        accounts_df.loc[accounts_df["name"] == cash_account, "id"].iloc[0]
-                    )
-                    add_cashflow(
-                        conn,
-                        user_id=user_id,
-                        account_id=account_id,
-                        flow_date=str(flow_date),
-                        flow_type=flow_type,
-                        amount=float(amount),
-                        note=note,
-                    )
-                    st.success(f"{flow_type} saved.")
-                    st.rerun()
+                    try:
+                        account_id = int(
+                            accounts_df.loc[accounts_df["name"] == cash_account, "id"].iloc[0]
+                        )
+                        add_cashflow(
+                            conn,
+                            user_id=user_id,
+                            account_id=account_id,
+                            flow_date=str(flow_date),
+                            flow_type=flow_type,
+                            amount=float(amount),
+                            note=note,
+                        )
+                        st.success(f"{flow_type} saved.")
+                        st.rerun()
+                    except Exception as exc:
+                        report_exception("Save transfer failed", exc)
 
             if not cashflows_df.empty:
                 st.markdown("Recent transfers")
@@ -1689,15 +1929,18 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 elif len(accounts_df) <= 1:
                     st.warning("You must keep at least one account.")
                 else:
-                    account_id = int(
-                        accounts_df.loc[accounts_df["name"] == delete_account_name, "id"].iloc[0]
-                    )
-                    deleted = delete_account(conn, user_id=user_id, account_id=account_id)
-                    if deleted:
-                        st.success(f"Deleted account '{delete_account_name}'.")
-                    else:
-                        st.warning("Account could not be deleted.")
-                    st.rerun()
+                    try:
+                        account_id = int(
+                            accounts_df.loc[accounts_df["name"] == delete_account_name, "id"].iloc[0]
+                        )
+                        deleted = delete_account(conn, user_id=user_id, account_id=account_id)
+                        if deleted:
+                            st.success(f"Deleted account '{delete_account_name}'.")
+                        else:
+                            st.warning("Account could not be deleted.")
+                        st.rerun()
+                    except Exception as exc:
+                        report_exception("Delete account failed", exc)
 
 
 def init_session_state() -> None:
@@ -1719,6 +1962,14 @@ def init_session_state() -> None:
         st.session_state["show_welcome_once"] = False
     if "remember_token" not in st.session_state:
         st.session_state["remember_token"] = None
+    if "pending_edit_pasted_image_bytes" not in st.session_state:
+        st.session_state["pending_edit_pasted_image_bytes"] = None
+    if "edit_paste_widget_version" not in st.session_state:
+        st.session_state["edit_paste_widget_version"] = 0
+    if "edit_trade_loaded_id" not in st.session_state:
+        st.session_state["edit_trade_loaded_id"] = None
+    if "debug_mode" not in st.session_state:
+        st.session_state["debug_mode"] = DEBUG_DEFAULT
 
 
 def main() -> None:
@@ -1742,24 +1993,27 @@ def main() -> None:
                 if "rt" in st.query_params:
                     del st.query_params["rt"]
 
-    if st.session_state["auth_user_id"]:
-        st.session_state["page"] = "app"
+    try:
+        if st.session_state["auth_user_id"]:
+            st.session_state["page"] = "app"
 
-    page = st.session_state["page"]
-    if page == "landing":
-        if not st.session_state["landing_loaded"]:
-            render_loading_screen()
+        page = st.session_state["page"]
+        if page == "landing":
+            if not st.session_state["landing_loaded"]:
+                render_loading_screen()
+            else:
+                render_landing_page()
+        elif page == "login":
+            render_login_page(conn)
+        elif page == "register":
+            render_register_page(conn)
         else:
-            render_landing_page()
-    elif page == "login":
-        render_login_page(conn)
-    elif page == "register":
-        render_register_page(conn)
-    else:
-        if st.session_state.get("show_welcome_once"):
-            render_fullscreen_welcome(st.session_state.get("auth_username", "Trader"))
-            return
-        render_dashboard(conn, int(st.session_state["auth_user_id"]))
+            if st.session_state.get("show_welcome_once"):
+                render_fullscreen_welcome(st.session_state.get("auth_username", "Trader"))
+                return
+            render_dashboard(conn, int(st.session_state["auth_user_id"]))
+    except Exception as exc:
+        report_exception("Unexpected app error", exc)
 
 
 if __name__ == "__main__":

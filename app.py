@@ -1128,7 +1128,7 @@ def render_pnl_calendar(trades_df: pd.DataFrame, month: int, year: int) -> None:
             pnl_html = ""
             if day_trades > 0:
                 pnl_html = (
-                    f'<div class="day-pnl {pnl_class}">${day_pnl:,.0f}</div>'
+                    f'<div class="day-pnl {pnl_class}">${abs(day_pnl):,.2f}</div>'
                     f'<div class="day-trades">{day_trades} trade{"s" if day_trades != 1 else ""}</div>'
                 )
 
@@ -1148,7 +1148,7 @@ def render_pnl_calendar(trades_df: pd.DataFrame, month: int, year: int) -> None:
             <div class="week-cell {week_class}">
                 <div class="week-body">
                     <div class="week-label">WEEK</div>
-                    <div class="week-pnl {week_pnl_class}">${week_pnl:,.0f}</div>
+                    <div class="week-pnl {week_pnl_class}">${abs(week_pnl):,.2f}</div>
                     <div class="week-trades">{week_trades} trade{"s" if week_trades != 1 else ""}</div>
                 </div>
             </div>

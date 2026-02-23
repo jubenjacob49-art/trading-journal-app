@@ -131,6 +131,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             email TEXT,
             password_hash TEXT NOT NULL,
             password_salt TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         )
         """
@@ -252,6 +253,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "accounts", "user_id", "user_id INTEGER")
     ensure_column(conn, "trades", "user_id", "user_id INTEGER")
     ensure_column(conn, "trades", "image_path", "image_path TEXT")
+    ensure_column(conn, "users", "is_admin", "is_admin INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "user_targets", "target_daily_pnl", "target_daily_pnl REAL NOT NULL DEFAULT 0")
     ensure_column(conn, "user_targets", "target_weekly_pnl", "target_weekly_pnl REAL NOT NULL DEFAULT 0")
     ensure_column(conn, "user_targets", "target_monthly_pnl", "target_monthly_pnl REAL NOT NULL DEFAULT 0")
@@ -316,6 +318,92 @@ def authenticate_user(conn: sqlite3.Connection, username: str, password: str) ->
     if candidate_hash != row["password_hash"]:
         return False, "Invalid username or password.", None
     return True, "Login successful.", int(row["id"])
+
+
+def is_user_admin(conn: sqlite3.Connection, user_id: int) -> bool:
+    row = conn.execute(
+        "SELECT is_admin FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        return False
+    return int(row["is_admin"] or 0) == 1
+
+
+def ensure_admin_user(conn: sqlite3.Connection) -> None:
+    username = "adminACjacob"
+    email = ""
+    password = "AC_Jacob06"
+    row = conn.execute(
+        "SELECT id FROM users WHERE username = ?",
+        (username,),
+    ).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE users SET is_admin = 1 WHERE id = ?",
+            (int(row["id"]),),
+        )
+        conn.commit()
+        return
+
+    salt = hashlib.sha256(f"{username}{time.time()}".encode("utf-8")).hexdigest()[:32]
+    password_hash = hash_password(password, salt)
+    now = datetime.now().isoformat(timespec="seconds")
+    cursor = conn.execute(
+        """
+        INSERT INTO users (username, email, password_hash, password_salt, is_admin, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (username, email, password_hash, salt, 1, now),
+    )
+    user_id = int(cursor.lastrowid)
+    conn.execute(
+        """
+        INSERT INTO accounts (user_id, name, broker, account_type, description, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (user_id, "Main", "Unknown", "Cash", "Default account", now),
+    )
+    conn.commit()
+
+
+def list_users_for_admin(conn: sqlite3.Connection) -> pd.DataFrame:
+    return pd.read_sql_query(
+        """
+        SELECT id, username, email, is_admin, created_at
+        FROM users
+        ORDER BY created_at DESC
+        """,
+        conn,
+    )
+
+
+def admin_reset_user_password(conn: sqlite3.Connection, target_user_id: int, new_password: str) -> tuple[bool, str]:
+    if len(new_password) < 6:
+        return False, "Password must be at least 6 characters."
+    row = conn.execute(
+        "SELECT username FROM users WHERE id = ?",
+        (target_user_id,),
+    ).fetchone()
+    if not row:
+        return False, "User not found."
+    username = str(row["username"])
+    salt = hashlib.sha256(f"{username}{time.time()}".encode("utf-8")).hexdigest()[:32]
+    password_hash = hash_password(new_password, salt)
+    conn.execute(
+        """
+        UPDATE users
+        SET password_hash = ?, password_salt = ?
+        WHERE id = ?
+        """,
+        (password_hash, salt, target_user_id),
+    )
+    conn.execute(
+        "DELETE FROM remember_tokens WHERE user_id = ?",
+        (target_user_id,),
+    )
+    conn.commit()
+    return True, "Password updated."
 
 
 def create_remember_token(conn: sqlite3.Connection, user_id: int, days_valid: int = 30) -> str:
@@ -1812,6 +1900,8 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
 
     with st.sidebar:
         st.markdown(f"**User:** {st.session_state.get('auth_username', 'Unknown')}")
+        if is_user_admin(conn, user_id):
+            st.markdown("**Role:** Admin")
         st.toggle("Debug Mode", key="debug_mode")
         with st.popover("Themes", use_container_width=True):
             saved_profiles = list_user_theme_profiles(conn, user_id)
@@ -2069,7 +2159,11 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     unsafe_allow_html=True,
                 )
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts"])
+    admin_enabled = is_user_admin(conn, user_id)
+    if admin_enabled:
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts", "Admin"])
+    else:
+        tab1, tab2, tab3, tab4 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts"])
 
     with tab1:
         st.subheader("New Trade")
@@ -2706,6 +2800,33 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     except Exception as exc:
                         report_exception("Delete account failed", exc)
 
+    if admin_enabled:
+        with tab5:
+            st.subheader("Admin")
+            users_df = list_users_for_admin(conn)
+            st.dataframe(
+                users_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.info("Passwords are not viewable. They are stored as hashed values.")
+
+            if not users_df.empty:
+                user_options = [
+                    f"#{int(row['id'])} | {row['username']}" for _, row in users_df.iterrows()
+                ]
+                with st.form("admin_reset_password_form", clear_on_submit=True):
+                    selected_user_line = st.selectbox("User", options=user_options)
+                    new_password = st.text_input("New Password", type="password")
+                    reset_submitted = st.form_submit_button("Reset Password")
+                    if reset_submitted:
+                        target_user_id = int(selected_user_line.split("|")[0].replace("#", "").strip())
+                        ok, msg = admin_reset_user_password(conn, target_user_id, new_password)
+                        if ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+
 
 def init_session_state() -> None:
     if "page" not in st.session_state:
@@ -2750,6 +2871,7 @@ def main() -> None:
     st.set_page_config(page_title="Trading Journal", page_icon="📈", layout="wide")
     conn = get_conn()
     init_db(conn)
+    ensure_admin_user(conn)
     init_session_state()
     inject_responsive_css()
     apply_pending_transition()

@@ -406,6 +406,30 @@ def admin_reset_user_password(conn: sqlite3.Connection, target_user_id: int, new
     return True, "Password updated."
 
 
+def admin_change_username(conn: sqlite3.Connection, target_user_id: int, new_username: str) -> tuple[bool, str]:
+    new_username = new_username.strip()
+    if len(new_username) < 3:
+        return False, "Username must be at least 3 characters."
+    row = conn.execute(
+        "SELECT id FROM users WHERE id = ?",
+        (target_user_id,),
+    ).fetchone()
+    if not row:
+        return False, "User not found."
+    existing = conn.execute(
+        "SELECT id FROM users WHERE LOWER(username) = LOWER(?) AND id != ?",
+        (new_username, target_user_id),
+    ).fetchone()
+    if existing:
+        return False, "Username already exists."
+    conn.execute(
+        "UPDATE users SET username = ? WHERE id = ?",
+        (new_username, target_user_id),
+    )
+    conn.commit()
+    return True, "Username updated."
+
+
 def create_remember_token(conn: sqlite3.Connection, user_id: int, days_valid: int = 30) -> str:
     raw = f"{uuid.uuid4().hex}{uuid.uuid4().hex}"
     token_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -2815,17 +2839,34 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 user_options = [
                     f"#{int(row['id'])} | {row['username']}" for _, row in users_df.iterrows()
                 ]
-                with st.form("admin_reset_password_form", clear_on_submit=True):
-                    selected_user_line = st.selectbox("User", options=user_options)
-                    new_password = st.text_input("New Password", type="password")
-                    reset_submitted = st.form_submit_button("Reset Password")
-                    if reset_submitted:
-                        target_user_id = int(selected_user_line.split("|")[0].replace("#", "").strip())
-                        ok, msg = admin_reset_user_password(conn, target_user_id, new_password)
-                        if ok:
-                            st.success(msg)
-                        else:
-                            st.error(msg)
+                a1, a2 = st.columns(2)
+                with a1:
+                    with st.form("admin_change_username_form", clear_on_submit=True):
+                        selected_user_for_rename = st.selectbox("User", options=user_options, key="admin_user_rename")
+                        new_username = st.text_input("New Username")
+                        rename_submitted = st.form_submit_button("Change Username")
+                        if rename_submitted:
+                            target_user_id = int(selected_user_for_rename.split("|")[0].replace("#", "").strip())
+                            ok, msg = admin_change_username(conn, target_user_id, new_username)
+                            if ok:
+                                if target_user_id == int(st.session_state.get("auth_user_id") or 0):
+                                    st.session_state["auth_username"] = new_username.strip()
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                with a2:
+                    with st.form("admin_reset_password_form", clear_on_submit=True):
+                        selected_user_line = st.selectbox("User", options=user_options, key="admin_user_password")
+                        new_password = st.text_input("New Password", type="password")
+                        reset_submitted = st.form_submit_button("Reset Password")
+                        if reset_submitted:
+                            target_user_id = int(selected_user_line.split("|")[0].replace("#", "").strip())
+                            ok, msg = admin_reset_user_password(conn, target_user_id, new_password)
+                            if ok:
+                                st.success(msg)
+                            else:
+                                st.error(msg)
 
 
 def init_session_state() -> None:

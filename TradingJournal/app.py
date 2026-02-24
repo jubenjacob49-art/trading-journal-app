@@ -8,6 +8,9 @@ import sqlite3
 import time
 import traceback
 import uuid
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -55,6 +58,8 @@ THEME_PRESETS = {
         "accent_color": "#8a6bff",
     },
 }
+NEWS_SCRAPER_DEFAULT = os.getenv("ENABLE_NEWS_SCRAPER", "1").strip() == "1"
+FOREX_FACTORY_WEEKLY_XML_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
 
 
 @dataclass
@@ -924,6 +929,67 @@ def parse_uploaded_trades_csv(uploaded_file) -> tuple[pd.DataFrame, str | None]:
     df = pd.read_csv(io.StringIO(text), sep=delimiter, engine="python", skiprows=best_i)
     df.columns = [str(col).strip().replace("\ufeff", "") for col in df.columns]
     return df, f"Auto-detected header row {best_i + 1} using '{delimiter}' delimiter."
+
+
+def parse_forex_factory_datetime(date_text: str, time_text: str) -> datetime | None:
+    raw_date = str(date_text or "").strip()
+    raw_time = str(time_text or "").strip().lower()
+    if not raw_date:
+        return None
+    if raw_time in {"all day", "day 1", "day 2", "day 3", "day 4", "day 5", "tentative", ""}:
+        raw_time = "12:00am"
+    try:
+        return datetime.strptime(f"{raw_date} {raw_time}", "%m-%d-%Y %I:%M%p")
+    except Exception:
+        try:
+            return datetime.strptime(raw_date, "%m-%d-%Y")
+        except Exception:
+            return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_forex_factory_events() -> pd.DataFrame:
+    req = urllib.request.Request(
+        FOREX_FACTORY_WEEKLY_XML_URL,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as response:
+        raw_bytes = response.read()
+    text = raw_bytes.decode("utf-8", errors="ignore")
+    root = ET.fromstring(text)
+    rows = []
+    for event in root.findall(".//event"):
+        title = (event.findtext("title") or "").strip()
+        currency = (event.findtext("country") or "").strip().upper()
+        date_text = (event.findtext("date") or "").strip()
+        time_text = (event.findtext("time") or "").strip()
+        impact = (event.findtext("impact") or "").strip().title()
+        forecast = (event.findtext("forecast") or "").strip()
+        previous = (event.findtext("previous") or "").strip()
+        actual = (event.findtext("actual") or "").strip()
+        event_url = (event.findtext("url") or "").strip()
+        when = parse_forex_factory_datetime(date_text, time_text)
+        rows.append(
+            {
+                "datetime": when,
+                "date": date_text,
+                "time": time_text,
+                "currency": currency,
+                "impact": impact if impact else "Unknown",
+                "event": title,
+                "actual": actual,
+                "forecast": forecast,
+                "previous": previous,
+                "url": event_url,
+            }
+        )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    if "datetime" in df.columns:
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+    df = df.sort_values("datetime", na_position="last").reset_index(drop=True)
+    return df
 
 
 def save_trade_image(uploaded_file, user_id: int, pasted_image_bytes: bytes | None = None) -> str:
@@ -2056,6 +2122,11 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 except Exception as exc:
                     report_exception("Return to admin failed", exc)
         st.toggle("Debug Mode", key="debug_mode")
+        st.toggle(
+            "Enable News Scraper",
+            key="news_scraper_enabled",
+            help="Failsafe switch. Turn off to disable Forex Factory scraping instantly.",
+        )
         with st.popover("Themes", use_container_width=True):
             saved_profiles = list_user_theme_profiles(conn, user_id)
             st.caption(f"Active: {st.session_state.get('theme_name', 'Custom')}")
@@ -2314,9 +2385,9 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
 
     admin_enabled = is_user_admin(conn, user_id)
     if admin_enabled:
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts", "Admin"])
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts", "News", "Admin"])
     else:
-        tab1, tab2, tab3, tab4 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts", "News"])
 
     with tab1:
         st.subheader("New Trade")
@@ -3323,8 +3394,75 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     except Exception as exc:
                         report_exception("Delete account failed", exc)
 
+    with tab5:
+        st.subheader("Forex News")
+        if not st.session_state.get("news_scraper_enabled", NEWS_SCRAPER_DEFAULT):
+            st.warning("News scraper is disabled by failsafe toggle.")
+            st.caption("Enable 'Enable News Scraper' in the sidebar to fetch Forex Factory events.")
+        else:
+            n1, n2, n3, n4 = st.columns([1.2, 1.2, 1.2, 1.4])
+            auto_refresh_on = n1.checkbox("Auto-refresh", value=True, key="news_auto_refresh")
+            refresh_seconds = n2.number_input("Refresh (sec)", min_value=30, max_value=1800, value=300, step=30)
+            next_24h_only = n3.checkbox("Next 24h", value=True, key="news_next_24h")
+            if n4.button("Refresh Now", use_container_width=True):
+                fetch_forex_factory_events.clear()
+                st.rerun()
+            if auto_refresh_on:
+                st.markdown(
+                    f"<meta http-equiv='refresh' content='{int(refresh_seconds)}'>",
+                    unsafe_allow_html=True,
+                )
+
+            events_df = pd.DataFrame()
+            try:
+                events_df = fetch_forex_factory_events()
+            except urllib.error.URLError as exc:
+                st.error(f"News fetch failed: {exc}")
+            except Exception as exc:
+                report_exception("News fetch failed", exc)
+
+            if events_df.empty:
+                st.info("No events available right now.")
+            else:
+                now_dt = datetime.now()
+                filtered_news = events_df.copy()
+                if next_24h_only:
+                    upper = now_dt + timedelta(hours=24)
+                    filtered_news = filtered_news[
+                        filtered_news["datetime"].notna()
+                        & (filtered_news["datetime"] >= now_dt)
+                        & (filtered_news["datetime"] <= upper)
+                    ]
+
+                currency_options = sorted([c for c in filtered_news["currency"].dropna().unique().tolist() if c])
+                selected_currencies = st.multiselect(
+                    "Currency Filter",
+                    options=currency_options,
+                    default=currency_options,
+                    key="news_currency_filter",
+                )
+                if selected_currencies:
+                    filtered_news = filtered_news[filtered_news["currency"].isin(selected_currencies)]
+
+                impact_options = ["High", "Medium", "Low", "Unknown"]
+                selected_impacts = st.multiselect(
+                    "Impact Filter",
+                    options=impact_options,
+                    default=["High", "Medium", "Low"],
+                    key="news_impact_filter",
+                )
+                if selected_impacts:
+                    filtered_news = filtered_news[filtered_news["impact"].isin(selected_impacts)]
+
+                display_df = filtered_news[
+                    ["datetime", "currency", "impact", "event", "actual", "forecast", "previous", "url"]
+                ].copy()
+                display_df["datetime"] = display_df["datetime"].dt.strftime("%Y-%m-%d %I:%M %p").fillna("")
+                st.caption(f"Events shown: {len(display_df)}")
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
+
     if admin_enabled:
-        with tab5:
+        with tab6:
             st.subheader("Admin")
             users_df = list_users_for_admin(conn)
             st.dataframe(
@@ -3422,6 +3560,8 @@ def init_session_state() -> None:
         st.session_state["edit_trade_loaded_id"] = None
     if "debug_mode" not in st.session_state:
         st.session_state["debug_mode"] = DEBUG_DEFAULT
+    if "news_scraper_enabled" not in st.session_state:
+        st.session_state["news_scraper_enabled"] = NEWS_SCRAPER_DEFAULT
     if "theme_reset_requested" not in st.session_state:
         st.session_state["theme_reset_requested"] = False
     if "trade_recent_symbol_version" not in st.session_state:

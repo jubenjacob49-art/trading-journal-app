@@ -2257,6 +2257,73 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 st.session_state["trade_symbol_input"] = st.session_state["trade_symbol_prefill"]
                 st.session_state["trade_symbol_prefill"] = None
 
+            if st.session_state.get("trade_qty_prefill") is not None:
+                st.session_state["trade_qty_input"] = float(st.session_state.get("trade_qty_prefill") or 0.0)
+                st.session_state["trade_qty_prefill"] = None
+
+            selected_account_id = int(accounts_df.loc[accounts_df["name"] == account_name, "id"].iloc[0])
+            selected_account_trades = trades_df[trades_df["account_id"] == selected_account_id]
+            selected_account_cashflows = cashflows_df[cashflows_df["account_id"] == selected_account_id]
+            selected_account_balance = float(selected_account_trades["net_pnl"].sum()) + float(
+                selected_account_cashflows["amount"].sum()
+            )
+
+            with st.expander("Auto Lot/Risk Calculator", expanded=False):
+                r1, r2, r3 = st.columns(3)
+                calc_account_balance = r1.number_input(
+                    "Account Balance",
+                    min_value=0.0,
+                    value=max(0.0, float(selected_account_balance)),
+                    step=100.0,
+                    key="trade_calc_account_balance",
+                )
+                calc_risk_percent = r2.number_input(
+                    "Risk %",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=1.0,
+                    step=0.1,
+                    key="trade_calc_risk_percent",
+                )
+                calc_entry_price = r3.number_input(
+                    "Entry (for risk calc)",
+                    min_value=0.0,
+                    value=0.0,
+                    step=0.01,
+                    key="trade_calc_entry_price",
+                )
+                r4, r5, r6 = st.columns(3)
+                calc_stop_price = r4.number_input(
+                    "Stop Price",
+                    min_value=0.0,
+                    value=0.0,
+                    step=0.01,
+                    key="trade_calc_stop_price",
+                )
+                calc_instrument_value = r5.number_input(
+                    "Instrument Value",
+                    min_value=0.000001,
+                    value=1.0,
+                    step=0.1,
+                    key="trade_calc_instrument_value",
+                    help="Value per 1.0 price move for 1 unit.",
+                )
+                risk_amount = float(calc_account_balance) * (float(calc_risk_percent) / 100.0)
+                stop_distance = abs(float(calc_entry_price) - float(calc_stop_price))
+                calc_qty = 0.0
+                if stop_distance > 0 and float(calc_instrument_value) > 0:
+                    calc_qty = risk_amount / (stop_distance * float(calc_instrument_value))
+                r6.metric("Calculated Qty", f"{calc_qty:,.4f}")
+                st.caption(
+                    f"Risk ${risk_amount:,.2f} | Stop distance {stop_distance:,.6f} | Value {float(calc_instrument_value):,.6f}"
+                )
+                if st.button("Use Calculated Qty", key="trade_use_calc_qty_btn", use_container_width=False):
+                    if calc_qty <= 0:
+                        st.warning("Calculated quantity is 0. Check entry, stop, and instrument value.")
+                    else:
+                        st.session_state["trade_qty_prefill"] = float(calc_qty)
+                        st.rerun()
+
             col_d, col_e, col_f = st.columns(3)
             symbol = col_d.text_input("Symbol", placeholder="AAPL", key="trade_symbol_input")
             quantity = col_e.number_input(
@@ -2362,6 +2429,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                         st.session_state["pending_trade_pasted_image_bytes"] = None
                         st.session_state["paste_widget_version"] = st.session_state.get("paste_widget_version", 0) + 1
                         st.session_state["trade_symbol_clear_requested"] = True
+                        st.session_state["trade_qty_prefill"] = None
                         st.session_state["trade_recent_symbol_version"] = (
                             st.session_state.get("trade_recent_symbol_version", 0) + 1
                         )

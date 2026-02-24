@@ -851,6 +851,10 @@ def to_float_or_none(value) -> float | None:
         return None
 
 
+def normalize_col_key(value: str) -> str:
+    return "".join(ch for ch in str(value).strip().lower() if ch.isalnum())
+
+
 def normalize_side(value: str) -> str | None:
     text = str(value or "").strip().lower()
     if text in {"long", "buy", "b", "l"}:
@@ -861,11 +865,65 @@ def normalize_side(value: str) -> str | None:
 
 
 def guess_csv_column(columns: list[str], keywords: list[str]) -> str:
-    for col in columns:
-        low = col.lower()
-        if any(k in low for k in keywords):
-            return col
+    normalized = [(col, normalize_col_key(col)) for col in columns]
+    for keyword in keywords:
+        norm_kw = normalize_col_key(keyword)
+        for col, norm_col in normalized:
+            if norm_kw and norm_kw in norm_col:
+                return col
     return "(None)"
+
+
+def parse_uploaded_trades_csv(uploaded_file) -> tuple[pd.DataFrame, str | None]:
+    raw = uploaded_file.getvalue()
+    text = ""
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except Exception:
+            continue
+    if not text:
+        raise ValueError("Could not decode CSV file.")
+
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return pd.DataFrame(), "Empty file."
+
+    delimiters = [",", ";", "\t", "|"]
+    score_candidates: list[tuple[int, int, str]] = []
+    for i, line in enumerate(lines[:30]):
+        norm = normalize_col_key(line)
+        score = 0
+        for token in [
+            "symbol",
+            "instrument",
+            "ordertype",
+            "lot",
+            "quantity",
+            "openingprice",
+            "closingprice",
+            "pnl",
+            "pl",
+            "profit",
+            "date",
+            "time",
+        ]:
+            if token in norm:
+                score += 1
+        delimiter_count = max(line.count(d) for d in delimiters)
+        if delimiter_count > 0:
+            score_candidates.append((i, score, line))
+
+    if not score_candidates:
+        df = pd.read_csv(io.StringIO(text), sep=None, engine="python")
+        return df, None
+
+    best_i, _, header_line = max(score_candidates, key=lambda x: (x[1], max(x[2].count(d) for d in delimiters)))
+    delimiter = max(delimiters, key=lambda d: header_line.count(d))
+    df = pd.read_csv(io.StringIO(text), sep=delimiter, engine="python", skiprows=best_i)
+    df.columns = [str(col).strip().replace("\ufeff", "") for col in df.columns]
+    return df, f"Auto-detected header row {best_i + 1} using '{delimiter}' delimiter."
 
 
 def save_trade_image(uploaded_file, user_id: int, pasted_image_bytes: bytes | None = None) -> str:
@@ -2778,24 +2836,27 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 )
                 if uploaded_csv is not None:
                     csv_df = pd.DataFrame()
+                    parse_note = None
                     try:
-                        csv_df = pd.read_csv(uploaded_csv, sep=None, engine="python")
+                        csv_df, parse_note = parse_uploaded_trades_csv(uploaded_csv)
                     except Exception as exc:
                         report_exception("Read CSV failed", exc)
                     if not csv_df.empty:
                         csv_df.columns = [str(col).strip() for col in csv_df.columns]
+                        if parse_note:
+                            st.caption(parse_note)
                         csv_cols = list(csv_df.columns)
                         col_options = ["(None)"] + csv_cols
 
-                        d_date = guess_csv_column(csv_cols, ["date", "time", "closed"])
+                        d_date = guess_csv_column(csv_cols, ["closing time", "close time", "closed", "date", "time"])
                         d_account = guess_csv_column(csv_cols, ["account", "login"])
                         d_symbol = guess_csv_column(csv_cols, ["symbol", "instrument", "pair"])
                         d_side = guess_csv_column(csv_cols, ["side", "type", "action", "direction"])
                         d_qty = guess_csv_column(csv_cols, ["qty", "quantity", "volume", "lot", "size"])
-                        d_entry = guess_csv_column(csv_cols, ["entry", "open", "price open"])
-                        d_exit = guess_csv_column(csv_cols, ["exit", "close", "price close"])
+                        d_entry = guess_csv_column(csv_cols, ["opening price", "open price", "entry", "open", "price open"])
+                        d_exit = guess_csv_column(csv_cols, ["closing price", "close price", "exit", "close", "price close"])
                         d_fees = guess_csv_column(csv_cols, ["fee", "commission", "swap", "charge"])
-                        d_net = guess_csv_column(csv_cols, ["net", "pnl", "profit"])
+                        d_net = guess_csv_column(csv_cols, ["p/l", "pl", "pnl", "net", "profit"])
                         d_tags = guess_csv_column(csv_cols, ["tag"])
                         d_notes = guess_csv_column(csv_cols, ["note", "comment", "remark"])
 

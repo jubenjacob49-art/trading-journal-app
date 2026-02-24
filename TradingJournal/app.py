@@ -838,6 +838,36 @@ def calculate_pnl(
     return gross, net
 
 
+def to_float_or_none(value) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "":
+        return None
+    cleaned = text.replace(",", "")
+    try:
+        return float(cleaned)
+    except Exception:
+        return None
+
+
+def normalize_side(value: str) -> str | None:
+    text = str(value or "").strip().lower()
+    if text in {"long", "buy", "b", "l"}:
+        return "Long"
+    if text in {"short", "sell", "s"}:
+        return "Short"
+    return None
+
+
+def guess_csv_column(columns: list[str], keywords: list[str]) -> str:
+    for col in columns:
+        low = col.lower()
+        if any(k in low for k in keywords):
+            return col
+    return "(None)"
+
+
 def save_trade_image(uploaded_file, user_id: int, pasted_image_bytes: bytes | None = None) -> str:
     if uploaded_file is None and pasted_image_bytes is None:
         return ""
@@ -2734,6 +2764,303 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                                 st.warning("Trade not found for this account.")
                         except Exception as exc:
                             report_exception("Update trade failed", exc)
+
+        st.markdown("Import Trades (CSV)")
+        with st.expander("Upload CSV and import", expanded=False):
+            if accounts_df.empty:
+                st.info("Create an account first.")
+            else:
+                uploaded_csv = st.file_uploader(
+                    "CSV file",
+                    type=["csv"],
+                    accept_multiple_files=False,
+                    key="trade_csv_import_file",
+                )
+                if uploaded_csv is not None:
+                    csv_df = pd.DataFrame()
+                    try:
+                        csv_df = pd.read_csv(uploaded_csv, sep=None, engine="python")
+                    except Exception as exc:
+                        report_exception("Read CSV failed", exc)
+                    if not csv_df.empty:
+                        csv_df.columns = [str(col).strip() for col in csv_df.columns]
+                        csv_cols = list(csv_df.columns)
+                        col_options = ["(None)"] + csv_cols
+
+                        d_date = guess_csv_column(csv_cols, ["date", "time", "closed"])
+                        d_account = guess_csv_column(csv_cols, ["account", "login"])
+                        d_symbol = guess_csv_column(csv_cols, ["symbol", "instrument", "pair"])
+                        d_side = guess_csv_column(csv_cols, ["side", "type", "action", "direction"])
+                        d_qty = guess_csv_column(csv_cols, ["qty", "quantity", "volume", "lot", "size"])
+                        d_entry = guess_csv_column(csv_cols, ["entry", "open", "price open"])
+                        d_exit = guess_csv_column(csv_cols, ["exit", "close", "price close"])
+                        d_fees = guess_csv_column(csv_cols, ["fee", "commission", "swap", "charge"])
+                        d_net = guess_csv_column(csv_cols, ["net", "pnl", "profit"])
+                        d_tags = guess_csv_column(csv_cols, ["tag"])
+                        d_notes = guess_csv_column(csv_cols, ["note", "comment", "remark"])
+
+                        c1, c2, c3 = st.columns(3)
+                        map_date = c1.selectbox(
+                            "Date Column",
+                            options=col_options,
+                            index=col_options.index(d_date) if d_date in col_options else 0,
+                            key="import_map_date",
+                        )
+                        map_account = c2.selectbox(
+                            "Account Column (optional)",
+                            options=col_options,
+                            index=col_options.index(d_account) if d_account in col_options else 0,
+                            key="import_map_account",
+                        )
+                        map_symbol = c3.selectbox(
+                            "Symbol Column",
+                            options=col_options,
+                            index=col_options.index(d_symbol) if d_symbol in col_options else 0,
+                            key="import_map_symbol",
+                        )
+
+                        c4, c5, c6 = st.columns(3)
+                        map_side = c4.selectbox(
+                            "Side Column",
+                            options=col_options,
+                            index=col_options.index(d_side) if d_side in col_options else 0,
+                            key="import_map_side",
+                        )
+                        map_qty = c5.selectbox(
+                            "Quantity Column",
+                            options=col_options,
+                            index=col_options.index(d_qty) if d_qty in col_options else 0,
+                            key="import_map_qty",
+                        )
+                        map_fees = c6.selectbox(
+                            "Fees Column (optional)",
+                            options=col_options,
+                            index=col_options.index(d_fees) if d_fees in col_options else 0,
+                            key="import_map_fees",
+                        )
+
+                        c7, c8, c9 = st.columns(3)
+                        map_entry = c7.selectbox(
+                            "Entry Column",
+                            options=col_options,
+                            index=col_options.index(d_entry) if d_entry in col_options else 0,
+                            key="import_map_entry",
+                        )
+                        map_exit = c8.selectbox(
+                            "Exit Column",
+                            options=col_options,
+                            index=col_options.index(d_exit) if d_exit in col_options else 0,
+                            key="import_map_exit",
+                        )
+                        map_net = c9.selectbox(
+                            "Net P&L Column (optional)",
+                            options=col_options,
+                            index=col_options.index(d_net) if d_net in col_options else 0,
+                            key="import_map_net",
+                        )
+
+                        c10, c11, c12 = st.columns(3)
+                        map_tags = c10.selectbox(
+                            "Tags Column (optional)",
+                            options=col_options,
+                            index=col_options.index(d_tags) if d_tags in col_options else 0,
+                            key="import_map_tags",
+                        )
+                        map_notes = c11.selectbox(
+                            "Notes Column (optional)",
+                            options=col_options,
+                            index=col_options.index(d_notes) if d_notes in col_options else 0,
+                            key="import_map_notes",
+                        )
+                        default_import_account = c12.selectbox(
+                            "Default Account",
+                            options=accounts_df["name"].tolist(),
+                            key="import_default_account",
+                        )
+
+                        use_manual_net = st.checkbox(
+                            "Use Net P&L as manual P&L (ignore Entry/Exit)",
+                            value=True,
+                            key="import_use_manual_net",
+                        )
+                        skip_duplicates = st.checkbox(
+                            "Skip duplicates",
+                            value=True,
+                            key="import_skip_duplicates",
+                        )
+
+                        st.caption(f"Detected rows: {len(csv_df)}")
+                        st.dataframe(csv_df.head(10), use_container_width=True, hide_index=True)
+
+                        if st.button("Import CSV Trades", key="import_csv_trades_btn", type="primary"):
+                            required_missing = [
+                                label
+                                for label, mapped in [
+                                    ("Date", map_date),
+                                    ("Symbol", map_symbol),
+                                    ("Side", map_side),
+                                    ("Quantity", map_qty),
+                                ]
+                                if mapped == "(None)"
+                            ]
+                            if required_missing:
+                                st.error(f"Missing required mappings: {', '.join(required_missing)}")
+                            elif (not use_manual_net) and (map_entry == "(None)" or map_exit == "(None)"):
+                                st.error("Entry and Exit mappings are required when manual Net P&L is off.")
+                            elif use_manual_net and map_net == "(None)":
+                                st.error("Map Net P&L column or disable manual Net P&L mode.")
+                            else:
+                                account_name_to_id = {
+                                    str(row["name"]).strip().lower(): int(row["id"])
+                                    for _, row in accounts_df.iterrows()
+                                }
+                                account_id_to_id = {
+                                    str(int(row["id"])): int(row["id"])
+                                    for _, row in accounts_df.iterrows()
+                                }
+                                default_account_id = int(
+                                    accounts_df.loc[accounts_df["name"] == default_import_account, "id"].iloc[0]
+                                )
+
+                                existing_signatures = set()
+                                if not trades_df.empty:
+                                    for _, row in trades_df.iterrows():
+                                        existing_signatures.add(
+                                            (
+                                                str(row["trade_date"]),
+                                                int(row["account_id"]),
+                                                str(row["symbol"]).upper().strip(),
+                                                str(row["side"]).strip(),
+                                                round(float(row["quantity"]), 8),
+                                                round(float(row["entry_price"]), 8),
+                                                round(float(row["exit_price"]), 8),
+                                                round(float(row["fees"]), 8),
+                                                round(float(row["net_pnl"]), 8),
+                                            )
+                                        )
+
+                                imported = 0
+                                skipped = 0
+                                error_samples: list[str] = []
+                                for i, row in csv_df.iterrows():
+                                    try:
+                                        parsed_date = pd.to_datetime(row[map_date], errors="coerce")
+                                        if pd.isna(parsed_date):
+                                            skipped += 1
+                                            continue
+                                        trade_date = parsed_date.date().isoformat()
+
+                                        symbol = str(row[map_symbol]).strip().upper()
+                                        if not symbol:
+                                            skipped += 1
+                                            continue
+
+                                        side = normalize_side(str(row[map_side]))
+                                        if side is None:
+                                            skipped += 1
+                                            continue
+
+                                        quantity = to_float_or_none(row[map_qty])
+                                        if quantity is None or quantity <= 0:
+                                            skipped += 1
+                                            continue
+
+                                        fees = 0.0
+                                        if map_fees != "(None)":
+                                            parsed_fees = to_float_or_none(row[map_fees])
+                                            fees = float(parsed_fees if parsed_fees is not None else 0.0)
+
+                                        account_id = default_account_id
+                                        if map_account != "(None)":
+                                            raw_acc = str(row[map_account]).strip()
+                                            if raw_acc:
+                                                account_id = account_name_to_id.get(
+                                                    raw_acc.lower(),
+                                                    account_id_to_id.get(raw_acc, default_account_id),
+                                                )
+
+                                        manual_net_pnl = None
+                                        entry_price = 0.0
+                                        exit_price = 0.0
+                                        if use_manual_net:
+                                            parsed_net = to_float_or_none(row[map_net])
+                                            if parsed_net is None:
+                                                skipped += 1
+                                                continue
+                                            manual_net_pnl = float(parsed_net)
+                                        else:
+                                            parsed_entry = to_float_or_none(row[map_entry])
+                                            parsed_exit = to_float_or_none(row[map_exit])
+                                            if (
+                                                parsed_entry is None
+                                                or parsed_exit is None
+                                                or parsed_entry <= 0
+                                                or parsed_exit <= 0
+                                            ):
+                                                skipped += 1
+                                                continue
+                                            entry_price = float(parsed_entry)
+                                            exit_price = float(parsed_exit)
+
+                                        if manual_net_pnl is not None:
+                                            sig_net = float(manual_net_pnl)
+                                        else:
+                                            _, calc_net = calculate_pnl(
+                                                side=side,
+                                                quantity=float(quantity),
+                                                entry_price=float(entry_price),
+                                                exit_price=float(exit_price),
+                                                fees=float(fees),
+                                            )
+                                            sig_net = float(calc_net)
+                                        signature = (
+                                            trade_date,
+                                            int(account_id),
+                                            symbol,
+                                            side,
+                                            round(float(quantity), 8),
+                                            round(float(entry_price), 8),
+                                            round(float(exit_price), 8),
+                                            round(float(fees), 8),
+                                            round(float(sig_net), 8),
+                                        )
+                                        if skip_duplicates and signature in existing_signatures:
+                                            skipped += 1
+                                            continue
+
+                                        tags = ""
+                                        notes = ""
+                                        if map_tags != "(None)":
+                                            tags = str(row[map_tags] or "").strip()
+                                        if map_notes != "(None)":
+                                            notes = str(row[map_notes] or "").strip()
+
+                                        trade_input = TradeInput(
+                                            trade_date=trade_date,
+                                            account_id=int(account_id),
+                                            symbol=symbol,
+                                            side=side,
+                                            quantity=float(quantity),
+                                            entry_price=float(entry_price),
+                                            exit_price=float(exit_price),
+                                            fees=float(fees),
+                                            tags=tags,
+                                            notes=notes,
+                                            image_path="",
+                                            manual_net_pnl=manual_net_pnl,
+                                        )
+                                        save_trade(conn, user_id, trade_input)
+                                        existing_signatures.add(signature)
+                                        imported += 1
+                                    except Exception as row_exc:
+                                        skipped += 1
+                                        if len(error_samples) < 5:
+                                            error_samples.append(f"row {i + 1}: {row_exc}")
+
+                                st.success(f"Imported {imported} trades. Skipped {skipped}.")
+                                if error_samples:
+                                    st.warning("Import notes: " + " | ".join(error_samples))
+                                st.rerun()
 
     with tab3:
         current = date.today()

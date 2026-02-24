@@ -14,9 +14,11 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from streamlit_paste_button import paste_image_button
 
@@ -931,6 +933,156 @@ def parse_uploaded_trades_csv(uploaded_file) -> tuple[pd.DataFrame, str | None]:
     return df, f"Auto-detected header row {best_i + 1} using '{delimiter}' delimiter."
 
 
+def parse_uploaded_ohlc_csv(uploaded_file) -> tuple[pd.DataFrame, str | None]:
+    raw = uploaded_file.getvalue()
+    text = ""
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except Exception:
+            continue
+    if not text:
+        raise ValueError("Could not decode CSV file.")
+
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return pd.DataFrame(), "Empty file."
+
+    delimiters = [",", ";", "\t", "|"]
+    score_candidates: list[tuple[int, int, str]] = []
+    for i, line in enumerate(lines[:40]):
+        norm = normalize_col_key(line)
+        score = 0
+        for token in ["time", "date", "open", "high", "low", "close", "timestamp", "datetime"]:
+            if token in norm:
+                score += 1
+        delimiter_count = max(line.count(d) for d in delimiters)
+        if delimiter_count > 0:
+            score_candidates.append((i, score, line))
+
+    if not score_candidates:
+        df = pd.read_csv(io.StringIO(text), sep=None, engine="python")
+        return df, None
+
+    best_i, _, header_line = max(score_candidates, key=lambda x: (x[1], max(x[2].count(d) for d in delimiters)))
+    delimiter = max(delimiters, key=lambda d: header_line.count(d))
+    df = pd.read_csv(io.StringIO(text), sep=delimiter, engine="python", skiprows=best_i)
+    df.columns = [str(col).strip().replace("\ufeff", "") for col in df.columns]
+    return df, f"Auto-detected header row {best_i + 1} using '{delimiter}' delimiter."
+
+
+def compute_max_drawdown(equity_values: list[float]) -> float:
+    if not equity_values:
+        return 0.0
+    peak = equity_values[0]
+    max_dd = 0.0
+    for value in equity_values:
+        if value > peak:
+            peak = value
+        dd = peak - value
+        if dd > max_dd:
+            max_dd = dd
+    return float(max_dd)
+
+
+def run_ema_crossover_backtest(
+    ohlc_df: pd.DataFrame,
+    fast_period: int,
+    slow_period: int,
+    initial_balance: float,
+    value_per_1_move: float,
+    cost_per_round_trade: float,
+) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+    temp = ohlc_df.copy().sort_values("time").reset_index(drop=True)
+    temp["ema_fast"] = temp["close"].ewm(span=int(fast_period), adjust=False).mean()
+    temp["ema_slow"] = temp["close"].ewm(span=int(slow_period), adjust=False).mean()
+
+    balance = float(initial_balance)
+    position = 0
+    entry_price = 0.0
+    entry_time = None
+    trade_rows = []
+    equity_rows = []
+
+    for i in range(1, len(temp)):
+        prev_fast = float(temp.loc[i - 1, "ema_fast"])
+        prev_slow = float(temp.loc[i - 1, "ema_slow"])
+        curr_fast = float(temp.loc[i, "ema_fast"])
+        curr_slow = float(temp.loc[i, "ema_slow"])
+        bar_price = float(temp.loc[i, "close"])
+        bar_time = temp.loc[i, "time"]
+
+        signal = 0
+        if prev_fast <= prev_slow and curr_fast > curr_slow:
+            signal = 1
+        elif prev_fast >= prev_slow and curr_fast < curr_slow:
+            signal = -1
+
+        if signal != 0 and signal != position:
+            if position != 0 and entry_time is not None:
+                pnl = ((bar_price - entry_price) * float(position) * float(value_per_1_move)) - float(cost_per_round_trade)
+                balance += pnl
+                trade_rows.append(
+                    {
+                        "entry_time": entry_time,
+                        "exit_time": bar_time,
+                        "side": "Long" if position > 0 else "Short",
+                        "entry_price": entry_price,
+                        "exit_price": bar_price,
+                        "pnl": pnl,
+                        "balance_after": balance,
+                    }
+                )
+            position = signal
+            entry_price = bar_price
+            entry_time = bar_time
+
+        floating = ((bar_price - entry_price) * float(position) * float(value_per_1_move)) if position != 0 else 0.0
+        equity_rows.append({"time": bar_time, "equity": balance + floating})
+
+    if position != 0 and entry_time is not None and len(temp) > 0:
+        final_price = float(temp.loc[len(temp) - 1, "close"])
+        final_time = temp.loc[len(temp) - 1, "time"]
+        pnl = ((final_price - entry_price) * float(position) * float(value_per_1_move)) - float(cost_per_round_trade)
+        balance += pnl
+        trade_rows.append(
+            {
+                "entry_time": entry_time,
+                "exit_time": final_time,
+                "side": "Long" if position > 0 else "Short",
+                "entry_price": entry_price,
+                "exit_price": final_price,
+                "pnl": pnl,
+                "balance_after": balance,
+            }
+        )
+        equity_rows.append({"time": final_time, "equity": balance})
+
+    trades_df = pd.DataFrame(trade_rows)
+    equity_df = pd.DataFrame(equity_rows)
+    net_pnl = float(trades_df["pnl"].sum()) if not trades_df.empty else 0.0
+    wins = int((trades_df["pnl"] > 0).sum()) if not trades_df.empty else 0
+    losses = int((trades_df["pnl"] <= 0).sum()) if not trades_df.empty else 0
+    total_trades = int(len(trades_df))
+    win_rate = float((wins / total_trades) * 100.0) if total_trades else 0.0
+    gross_profit = float(trades_df.loc[trades_df["pnl"] > 0, "pnl"].sum()) if not trades_df.empty else 0.0
+    gross_loss = float(trades_df.loc[trades_df["pnl"] < 0, "pnl"].sum()) if not trades_df.empty else 0.0
+    profit_factor = float(gross_profit / abs(gross_loss)) if gross_loss < 0 else 0.0
+    max_drawdown = compute_max_drawdown(equity_df["equity"].tolist() if not equity_df.empty else [initial_balance])
+    metrics = {
+        "net_pnl": net_pnl,
+        "ending_balance": float(initial_balance) + net_pnl,
+        "trades": total_trades,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "max_drawdown": max_drawdown,
+    }
+    return metrics, equity_df, trades_df
+
+
 def parse_forex_factory_datetime(date_text: str, time_text: str) -> datetime | None:
     raw_date = str(date_text or "").strip()
     raw_time = str(time_text or "").strip().lower()
@@ -990,6 +1142,36 @@ def fetch_forex_factory_events() -> pd.DataFrame:
         df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
     df = df.sort_values("datetime", na_position="last").reset_index(drop=True)
     return df
+
+
+def build_forex_market_hours_table_utc8() -> pd.DataFrame:
+    tz = ZoneInfo("Asia/Singapore")
+    now_local = datetime.now(tz)
+    sessions = [
+        ("Sydney", 6, 15),
+        ("Tokyo", 8, 17),
+        ("London", 15, 0),
+        ("New York", 20, 5),
+    ]
+    rows = []
+    for session_name, open_hour, close_hour in sessions:
+        open_dt = now_local.replace(hour=open_hour, minute=0, second=0, microsecond=0)
+        close_dt = now_local.replace(hour=close_hour, minute=0, second=0, microsecond=0)
+        if close_hour <= open_hour:
+            close_dt = close_dt + timedelta(days=1)
+            if now_local < open_dt and now_local.hour < close_hour:
+                open_dt = open_dt - timedelta(days=1)
+                close_dt = close_dt - timedelta(days=1)
+        is_open = open_dt <= now_local < close_dt
+        rows.append(
+            {
+                "Session": session_name,
+                "Open (UTC+8)": open_dt.strftime("%I:%M %p"),
+                "Close (UTC+8)": close_dt.strftime("%I:%M %p"),
+                "Status": "Open" if is_open else "Closed",
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def save_trade_image(uploaded_file, user_id: int, pasted_image_bytes: bytes | None = None) -> str:
@@ -1215,6 +1397,11 @@ def delete_account(conn: sqlite3.Connection, user_id: int, account_id: int) -> b
 
 def account_metrics(trades_df: pd.DataFrame, cashflows_df: pd.DataFrame) -> dict:
     cash_total = float(cashflows_df["amount"].sum()) if not cashflows_df.empty else 0.0
+    total_withdrawal = (
+        float(cashflows_df.loc[cashflows_df["amount"] < 0, "amount"].abs().sum())
+        if not cashflows_df.empty
+        else 0.0
+    )
     if trades_df.empty:
         return {
             "total_net": 0.0,
@@ -1223,6 +1410,7 @@ def account_metrics(trades_df: pd.DataFrame, cashflows_df: pd.DataFrame) -> dict
             "win_rate": 0.0,
             "avg_net": 0.0,
             "account_balance": cash_total,
+            "total_withdrawal": total_withdrawal,
             "win_streak": 0,
             "best_win_streak": 0,
         }
@@ -1252,6 +1440,7 @@ def account_metrics(trades_df: pd.DataFrame, cashflows_df: pd.DataFrame) -> dict
         "win_rate": float((wins / total) * 100 if total else 0),
         "avg_net": float(trades_df["net_pnl"].mean()),
         "account_balance": total_net + cash_total,
+        "total_withdrawal": total_withdrawal,
         "win_streak": current_streak,
         "best_win_streak": best_streak,
     }
@@ -2263,7 +2452,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
 
     m = account_metrics(scoped_trades, scoped_cashflows)
     p = period_pnl_metrics(scoped_trades)
-    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
     c1.metric("Total Net P&L", f"${m['total_net']:,.2f}")
     c2.metric("Win Rate", f"{m['win_rate']:.1f}%")
     c3.metric("Wins", m["wins"])
@@ -2271,6 +2460,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
     c5.metric("Avg Net/Trade", f"${m['avg_net']:,.2f}")
     c6.metric("Account Balance", f"${m['account_balance']:,.2f}")
     c7.metric("Win Streak", m["win_streak"], delta=f"Best {m['best_win_streak']}")
+    c8.metric("Total Withdrawal", f"${m['total_withdrawal']:,.2f}")
 
     targets = get_user_pnl_targets(conn, user_id)
     st.markdown(
@@ -2385,9 +2575,11 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
 
     admin_enabled = is_user_admin(conn, user_id)
     if admin_enabled:
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts", "News", "Admin"])
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+            ["Add Trade", "Journal", "Calendar", "Accounts", "Backtest", "News", "Admin"]
+        )
     else:
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts", "News"])
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Add Trade", "Journal", "Calendar", "Accounts", "Backtest", "News"])
 
     with tab1:
         st.subheader("New Trade")
@@ -3395,7 +3587,175 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                         report_exception("Delete account failed", exc)
 
     with tab5:
+        st.subheader("Forex Backtesting")
+        uploaded_ohlc_csv = st.file_uploader(
+            "OHLC CSV file",
+            type=["csv"],
+            accept_multiple_files=False,
+            key="backtest_ohlc_csv_file",
+        )
+        if uploaded_ohlc_csv is None:
+            st.info("Upload OHLC data CSV to start backtesting.")
+        else:
+            ohlc_df = pd.DataFrame()
+            parse_note = None
+            try:
+                ohlc_df, parse_note = parse_uploaded_ohlc_csv(uploaded_ohlc_csv)
+            except Exception as exc:
+                report_exception("Read OHLC CSV failed", exc)
+
+            if not ohlc_df.empty:
+                ohlc_df.columns = [str(col).strip() for col in ohlc_df.columns]
+                if parse_note:
+                    st.caption(parse_note)
+
+                col_options = ["(None)"] + list(ohlc_df.columns)
+                d_time = guess_csv_column(list(ohlc_df.columns), ["time", "date", "timestamp", "datetime"])
+                d_open = guess_csv_column(list(ohlc_df.columns), ["open"])
+                d_high = guess_csv_column(list(ohlc_df.columns), ["high"])
+                d_low = guess_csv_column(list(ohlc_df.columns), ["low"])
+                d_close = guess_csv_column(list(ohlc_df.columns), ["close", "closing price", "price close"])
+
+                m1, m2, m3, m4, m5 = st.columns(5)
+                map_time = m1.selectbox(
+                    "Time Column",
+                    options=col_options,
+                    index=col_options.index(d_time) if d_time in col_options else 0,
+                    key="bt_map_time",
+                )
+                map_open = m2.selectbox(
+                    "Open Column",
+                    options=col_options,
+                    index=col_options.index(d_open) if d_open in col_options else 0,
+                    key="bt_map_open",
+                )
+                map_high = m3.selectbox(
+                    "High Column",
+                    options=col_options,
+                    index=col_options.index(d_high) if d_high in col_options else 0,
+                    key="bt_map_high",
+                )
+                map_low = m4.selectbox(
+                    "Low Column",
+                    options=col_options,
+                    index=col_options.index(d_low) if d_low in col_options else 0,
+                    key="bt_map_low",
+                )
+                map_close = m5.selectbox(
+                    "Close Column",
+                    options=col_options,
+                    index=col_options.index(d_close) if d_close in col_options else 0,
+                    key="bt_map_close",
+                )
+
+                required_mappings = [map_time, map_open, map_high, map_low, map_close]
+                if any(v == "(None)" for v in required_mappings):
+                    st.error("Map all OHLC/time columns to continue.")
+                else:
+                    prepared = pd.DataFrame(
+                        {
+                            "time": pd.to_datetime(ohlc_df[map_time], errors="coerce"),
+                            "open": pd.to_numeric(ohlc_df[map_open], errors="coerce"),
+                            "high": pd.to_numeric(ohlc_df[map_high], errors="coerce"),
+                            "low": pd.to_numeric(ohlc_df[map_low], errors="coerce"),
+                            "close": pd.to_numeric(ohlc_df[map_close], errors="coerce"),
+                        }
+                    ).dropna()
+                    prepared = prepared.sort_values("time").reset_index(drop=True)
+
+                    if len(prepared) < 60:
+                        st.warning("Need at least 60 valid candles for this backtest.")
+                    else:
+                        b1, b2, b3, b4 = st.columns(4)
+                        fast_period = int(b1.number_input("EMA Fast", min_value=2, max_value=200, value=20, step=1))
+                        slow_period = int(b2.number_input("EMA Slow", min_value=3, max_value=400, value=50, step=1))
+                        initial_balance = float(
+                            b3.number_input("Initial Balance", min_value=0.0, value=10000.0, step=100.0)
+                        )
+                        value_per_1_move = float(
+                            b4.number_input("Value per 1.0 Move", min_value=0.000001, value=1.0, step=0.1)
+                        )
+                        cost_per_round_trade = st.number_input(
+                            "Cost per Trade (spread+commission)",
+                            min_value=0.0,
+                            value=0.0,
+                            step=0.1,
+                            key="bt_cost_per_trade",
+                        )
+                        if fast_period >= slow_period:
+                            st.warning("EMA Fast must be smaller than EMA Slow.")
+                        else:
+                            replay_max = int(len(prepared))
+                            replay_default = min(replay_max, 250)
+                            replay_bars = st.slider(
+                                "Replay Bars",
+                                min_value=60,
+                                max_value=replay_max,
+                                value=replay_default,
+                                step=1,
+                                key="bt_replay_bars",
+                            )
+                            replay_df = prepared.iloc[:replay_bars].copy()
+                            candle_fig = go.Figure(
+                                data=[
+                                    go.Candlestick(
+                                        x=replay_df["time"],
+                                        open=replay_df["open"],
+                                        high=replay_df["high"],
+                                        low=replay_df["low"],
+                                        close=replay_df["close"],
+                                        name="Price",
+                                    )
+                                ]
+                            )
+                            candle_fig.update_layout(
+                                title="Replay View",
+                                xaxis_title="Time",
+                                yaxis_title="Price",
+                                xaxis_rangeslider_visible=False,
+                                height=460,
+                            )
+                            st.plotly_chart(candle_fig, use_container_width=True)
+
+                            metrics, equity_df, bt_trades_df = run_ema_crossover_backtest(
+                                ohlc_df=replay_df,
+                                fast_period=fast_period,
+                                slow_period=slow_period,
+                                initial_balance=initial_balance,
+                                value_per_1_move=value_per_1_move,
+                                cost_per_round_trade=float(cost_per_round_trade),
+                            )
+                            k1, k2, k3, k4, k5, k6 = st.columns(6)
+                            k1.metric("Net P&L", f"${metrics['net_pnl']:,.2f}")
+                            k2.metric("Ending Balance", f"${metrics['ending_balance']:,.2f}")
+                            k3.metric("Trades", metrics["trades"])
+                            k4.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
+                            k5.metric("Profit Factor", f"{metrics['profit_factor']:.2f}")
+                            k6.metric("Max Drawdown", f"${metrics['max_drawdown']:,.2f}")
+
+                            if not equity_df.empty:
+                                eq_fig = px.line(equity_df, x="time", y="equity", title="Equity Curve")
+                                st.plotly_chart(eq_fig, use_container_width=True)
+                            if not bt_trades_df.empty:
+                                show_trades = bt_trades_df.copy()
+                                show_trades["entry_time"] = pd.to_datetime(show_trades["entry_time"]).dt.strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
+                                show_trades["exit_time"] = pd.to_datetime(show_trades["exit_time"]).dt.strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
+                                st.dataframe(show_trades, use_container_width=True, hide_index=True)
+                            else:
+                                st.info("No trades generated with current settings.")
+
+    with tab6:
         st.subheader("Forex News")
+        st.markdown("Forex Market Hours (UTC+8)")
+        now_utc8 = datetime.now(ZoneInfo("Asia/Singapore"))
+        st.caption(f"Current time: {now_utc8.strftime('%Y-%m-%d %I:%M:%S %p')} UTC+8")
+        market_hours_df = build_forex_market_hours_table_utc8()
+        st.dataframe(market_hours_df, use_container_width=True, hide_index=True)
+
         if not st.session_state.get("news_scraper_enabled", NEWS_SCRAPER_DEFAULT):
             st.warning("News scraper is disabled by failsafe toggle.")
             st.caption("Enable 'Enable News Scraper' in the sidebar to fetch Forex Factory events.")
@@ -3462,7 +3822,7 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                 st.dataframe(display_df, use_container_width=True, hide_index=True)
 
     if admin_enabled:
-        with tab6:
+        with tab7:
             st.subheader("Admin")
             users_df = list_users_for_admin(conn)
             st.dataframe(

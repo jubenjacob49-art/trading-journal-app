@@ -20,6 +20,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_paste_button import paste_image_button
 
 
@@ -1172,6 +1173,290 @@ def build_forex_market_hours_table_utc8() -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def render_forex_market_hours_widget() -> None:
+    html = """
+    <style>
+      .mh-wrap { border: 1px solid #2c3344; border-radius: 14px; padding: 14px; background: linear-gradient(180deg, #101722 0%, #0e141f 100%); }
+      .mh-head { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px; }
+      .mh-title { font-size: 28px; font-weight: 800; color:#ecf2ff; line-height:1.1; }
+      .mh-sub { color:#9fb0cc; font-size:13px; margin-top:2px; }
+      .mh-clock { background:#5b31c6; color:#ffffff; border-radius:14px; padding:10px 12px; min-width:110px; text-align:center; font-weight:700; }
+      .mh-zone { color:#d9e4ff; font-size:13px; margin-top:8px; margin-bottom:8px; }
+      .mh-grid { border: 1px solid #2d3446; border-radius: 10px; overflow: hidden; position: relative; }
+      .mh-hours { display:grid; grid-template-columns: 170px 1fr; background:#161f2e; border-bottom:1px solid #2f374c; }
+      .mh-hour-spacer { padding:8px 10px; color:#8fa1c4; font-size:12px; font-weight:700; }
+      .mh-hours-track { display:grid; grid-template-columns: repeat(24, minmax(20px,1fr)); }
+      .mh-hour { text-align:center; color:#9fb0cc; font-size:11px; padding:8px 0; border-left:1px solid #253047; }
+      .mh-hour:first-child { border-left:none; }
+      .mh-row { display:grid; grid-template-columns: 170px 1fr; min-height:58px; border-bottom:1px solid #222b3e; }
+      .mh-row:last-child { border-bottom:none; }
+      .mh-label { padding:8px 10px; display:flex; flex-direction:column; justify-content:center; background:#141c2a; }
+      .mh-name { color:#eef4ff; font-size:15px; font-weight:700; line-height:1.1; }
+      .mh-local { color:#95a7c8; font-size:12px; margin-top:2px; }
+      .mh-timeline {
+        position:relative;
+        overflow:hidden;
+        background: repeating-linear-gradient(
+          90deg,
+          #0f1522 0px,
+          #0f1522 calc((100% / 24) - 1px),
+          #24304b calc((100% / 24) - 1px),
+          #24304b calc(100% / 24)
+        );
+      }
+      .mh-bar { position:absolute; top:12px; height:34px; border-radius:8px; opacity:0.95; }
+      .mh-sydney { background:#3560d2; }
+      .mh-tokyo { background:#a1008b; }
+      .mh-london { background:#2e91ff; }
+      .mh-newyork { background:#42c218; }
+      .mh-track-wrap { position: relative; }
+      .mh-now-global {
+        position:absolute;
+        width:2px;
+        background:#a67cfb;
+        box-shadow:0 0 0 1px rgba(166,124,251,0.28);
+        z-index:20;
+        pointer-events:none;
+      }
+      .mh-now-handle {
+        position:absolute;
+        width:16px;
+        height:16px;
+        border-radius:50%;
+        background:#7a52e2;
+        border:2px solid #d9caff;
+        z-index:22;
+        cursor:ew-resize;
+        box-shadow: 0 0 0 4px rgba(122,82,226,0.18);
+        touch-action:none;
+      }
+      @media (max-width: 960px) {
+        .mh-title { font-size: 22px; }
+        .mh-hours, .mh-row { grid-template-columns: 120px 1fr; }
+        .mh-name { font-size:13px; }
+      }
+    </style>
+    <div class="mh-wrap">
+      <div class="mh-head">
+        <div>
+          <div class="mh-title">Forex Market Time Zone Converter</div>
+          <div class="mh-sub">Synced to your local browser time.</div>
+        </div>
+        <div class="mh-clock">
+          <div id="mhNowTime">--:-- --</div>
+          <div id="mhNowDay" style="font-size:12px;opacity:0.9;">---</div>
+        </div>
+      </div>
+      <div class="mh-zone" id="mhZone">Timezone: --</div>
+      <div class="mh-grid" id="mhGrid"></div>
+    </div>
+    <script>
+      const sessions = [
+        { name: "Sydney", colorClass: "mh-sydney", startUtc: 21, endUtc: 6 },
+        { name: "Tokyo", colorClass: "mh-tokyo", startUtc: 0, endUtc: 9 },
+        { name: "London", colorClass: "mh-london", startUtc: 8, endUtc: 17 },
+        { name: "New York", colorClass: "mh-newyork", startUtc: 13, endUtc: 22 }
+      ];
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Local";
+      const grid = document.getElementById("mhGrid");
+      document.getElementById("mhZone").textContent = "Timezone: " + tz + " (12-hour)";
+
+      const header = document.createElement("div");
+      header.className = "mh-hours";
+      const spacer = document.createElement("div");
+      spacer.className = "mh-hour-spacer";
+      spacer.textContent = "Sessions";
+      const hoursTrack = document.createElement("div");
+      hoursTrack.className = "mh-hours-track";
+      for (let h = 0; h < 24; h++) {
+        const cell = document.createElement("div");
+        cell.className = "mh-hour";
+        let hour = h % 12;
+        if (hour === 0) hour = 12;
+        const ampm = h < 12 ? "am" : "pm";
+        cell.textContent = hour + ampm;
+        hoursTrack.appendChild(cell);
+      }
+      header.appendChild(spacer);
+      header.appendChild(hoursTrack);
+      grid.appendChild(header);
+
+      function utcToLocalHour(utcHour) {
+        const offset = -new Date().getTimezoneOffset() / 60;
+        let value = (utcHour + offset) % 24;
+        if (value < 0) value += 24;
+        return value;
+      }
+      function hourToPct(hour) { return (hour / 24) * 100; }
+      function fmt12(hFloat) {
+        let h = Math.floor(hFloat) % 24;
+        if (h < 0) h += 24;
+        const m = Math.floor((hFloat - Math.floor(hFloat)) * 60);
+        let hh = h % 12;
+        if (hh === 0) hh = 12;
+        const ampm = h < 12 ? "am" : "pm";
+        const mm = String(m).padStart(2, "0");
+        return `${hh}:${mm} ${ampm}`;
+      }
+
+      const trackWrap = document.createElement("div");
+      trackWrap.className = "mh-track-wrap";
+      grid.appendChild(trackWrap);
+
+      const rowEls = [];
+      sessions.forEach((s) => {
+        const row = document.createElement("div");
+        row.className = "mh-row";
+
+        const label = document.createElement("div");
+        label.className = "mh-label";
+        const name = document.createElement("div");
+        name.className = "mh-name";
+        name.textContent = s.name;
+        const local = document.createElement("div");
+        local.className = "mh-local";
+        local.id = "local_" + s.name.replace(/\\s+/g, "");
+        label.appendChild(name);
+        label.appendChild(local);
+
+        const timeline = document.createElement("div");
+        timeline.className = "mh-timeline";
+        const barA = document.createElement("div");
+        barA.className = "mh-bar " + s.colorClass;
+        const barB = document.createElement("div");
+        barB.className = "mh-bar " + s.colorClass;
+        barB.style.display = "none";
+        timeline.appendChild(barA);
+        timeline.appendChild(barB);
+
+        row.appendChild(label);
+        row.appendChild(timeline);
+        trackWrap.appendChild(row);
+        rowEls.push({ row, timeline, barA, barB, session: s });
+      });
+
+      const nowGlobal = document.createElement("div");
+      nowGlobal.className = "mh-now-global";
+      const nowHandle = document.createElement("div");
+      nowHandle.className = "mh-now-handle";
+      trackWrap.appendChild(nowGlobal);
+      trackWrap.appendChild(nowHandle);
+
+      let dragActive = false;
+      let displayRatio = 0;
+
+      function getLayout() {
+        const firstRow = rowEls.length ? rowEls[0].row : null;
+        const firstTimeline = rowEls.length ? rowEls[0].timeline : null;
+        if (!firstRow || !firstTimeline) return null;
+        const wrapRect = trackWrap.getBoundingClientRect();
+        const rowRect = firstRow.getBoundingClientRect();
+        const timelineRect = firstTimeline.getBoundingClientRect();
+        const rowsBottom = trackWrap.getBoundingClientRect().bottom;
+        return {
+          wrapLeft: wrapRect.left,
+          labelLeftPx: timelineRect.left - wrapRect.left,
+          timelineWidth: timelineRect.width,
+          topPx: rowRect.top - wrapRect.top,
+          bottomPx: rowsBottom - wrapRect.top,
+        };
+      }
+
+      function setLineByRatio(ratio) {
+        const layout = getLayout();
+        if (!layout) return;
+        const r = Math.max(0, Math.min(1, ratio));
+        const px = layout.labelLeftPx + (layout.timelineWidth * r);
+        nowGlobal.style.left = px + "px";
+        nowGlobal.style.top = layout.topPx + "px";
+        nowGlobal.style.height = (layout.bottomPx - layout.topPx) + "px";
+        nowHandle.style.left = (px - 8) + "px";
+        nowHandle.style.top = (layout.topPx - 8) + "px";
+      }
+
+      function ratioFromPointer(clientX) {
+        const layout = getLayout();
+        if (!layout || layout.timelineWidth <= 0) return 0;
+        const within = clientX - (layout.wrapLeft + layout.labelLeftPx);
+        return Math.max(0, Math.min(1, within / layout.timelineWidth));
+      }
+
+      function applyBars() {
+        rowEls.forEach(({barA, barB, session}) => {
+          const startLocal = utcToLocalHour(session.startUtc);
+          const endLocal = utcToLocalHour(session.endUtc);
+          const localLabel = document.getElementById("local_" + session.name.replace(/\\s+/g, ""));
+          localLabel.textContent = fmt12(startLocal) + " - " + fmt12(endLocal);
+          if (endLocal > startLocal) {
+            barA.style.left = hourToPct(startLocal) + "%";
+            barA.style.width = hourToPct(endLocal - startLocal) + "%";
+            barB.style.display = "none";
+          } else {
+            barA.style.left = hourToPct(startLocal) + "%";
+            barA.style.width = hourToPct(24 - startLocal) + "%";
+            barB.style.display = "block";
+            barB.style.left = "0%";
+            barB.style.width = hourToPct(endLocal) + "%";
+          }
+        });
+      }
+
+      function ratioToClockText(ratio) {
+        const hFloat = Math.max(0, Math.min(1, ratio)) * 24;
+        return fmt12(hFloat);
+      }
+
+      function setRealtimeRatio() {
+        const now = new Date();
+        const nowH = now.getHours() + (now.getMinutes() / 60) + (now.getSeconds() / 3600);
+        displayRatio = nowH / 24;
+      }
+
+      function updateNow() {
+        const now = new Date();
+        document.getElementById("mhNowTime").textContent = now.toLocaleTimeString([], {hour: "numeric", minute: "2-digit", hour12: true});
+        document.getElementById("mhNowDay").textContent = now.toLocaleDateString([], {weekday: "long"});
+        if (!dragActive) {
+          setRealtimeRatio();
+        } else {
+          document.getElementById("mhNowTime").textContent = ratioToClockText(displayRatio);
+        }
+        setLineByRatio(displayRatio);
+      }
+
+      nowHandle.addEventListener("pointerdown", (ev) => {
+        dragActive = true;
+        nowHandle.setPointerCapture(ev.pointerId);
+      });
+      nowHandle.addEventListener("pointermove", (ev) => {
+        if (!dragActive) return;
+        displayRatio = ratioFromPointer(ev.clientX);
+        document.getElementById("mhNowTime").textContent = ratioToClockText(displayRatio);
+        setLineByRatio(displayRatio);
+      });
+      nowHandle.addEventListener("pointerup", () => {
+        dragActive = false;
+        setRealtimeRatio();
+        document.getElementById("mhNowTime").textContent = new Date().toLocaleTimeString([], {hour: "numeric", minute: "2-digit", hour12: true});
+        setLineByRatio(displayRatio);
+      });
+      nowHandle.addEventListener("pointercancel", () => {
+        dragActive = false;
+        setRealtimeRatio();
+        document.getElementById("mhNowTime").textContent = new Date().toLocaleTimeString([], {hour: "numeric", minute: "2-digit", hour12: true});
+        setLineByRatio(displayRatio);
+      });
+      window.addEventListener("resize", () => setLineByRatio(displayRatio));
+
+      applyBars();
+      setRealtimeRatio();
+      updateNow();
+      setInterval(updateNow, 1000);
+    </script>
+    """
+    components.html(html, height=470, scrolling=False)
 
 
 def save_trade_image(uploaded_file, user_id: int, pasted_image_bytes: bytes | None = None) -> str:
@@ -3588,173 +3873,12 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
 
     with tab5:
         st.subheader("Forex Backtesting")
-        uploaded_ohlc_csv = st.file_uploader(
-            "OHLC CSV file",
-            type=["csv"],
-            accept_multiple_files=False,
-            key="backtest_ohlc_csv_file",
-        )
-        if uploaded_ohlc_csv is None:
-            st.info("Upload OHLC data CSV to start backtesting.")
-        else:
-            ohlc_df = pd.DataFrame()
-            parse_note = None
-            try:
-                ohlc_df, parse_note = parse_uploaded_ohlc_csv(uploaded_ohlc_csv)
-            except Exception as exc:
-                report_exception("Read OHLC CSV failed", exc)
-
-            if not ohlc_df.empty:
-                ohlc_df.columns = [str(col).strip() for col in ohlc_df.columns]
-                if parse_note:
-                    st.caption(parse_note)
-
-                col_options = ["(None)"] + list(ohlc_df.columns)
-                d_time = guess_csv_column(list(ohlc_df.columns), ["time", "date", "timestamp", "datetime"])
-                d_open = guess_csv_column(list(ohlc_df.columns), ["open"])
-                d_high = guess_csv_column(list(ohlc_df.columns), ["high"])
-                d_low = guess_csv_column(list(ohlc_df.columns), ["low"])
-                d_close = guess_csv_column(list(ohlc_df.columns), ["close", "closing price", "price close"])
-
-                m1, m2, m3, m4, m5 = st.columns(5)
-                map_time = m1.selectbox(
-                    "Time Column",
-                    options=col_options,
-                    index=col_options.index(d_time) if d_time in col_options else 0,
-                    key="bt_map_time",
-                )
-                map_open = m2.selectbox(
-                    "Open Column",
-                    options=col_options,
-                    index=col_options.index(d_open) if d_open in col_options else 0,
-                    key="bt_map_open",
-                )
-                map_high = m3.selectbox(
-                    "High Column",
-                    options=col_options,
-                    index=col_options.index(d_high) if d_high in col_options else 0,
-                    key="bt_map_high",
-                )
-                map_low = m4.selectbox(
-                    "Low Column",
-                    options=col_options,
-                    index=col_options.index(d_low) if d_low in col_options else 0,
-                    key="bt_map_low",
-                )
-                map_close = m5.selectbox(
-                    "Close Column",
-                    options=col_options,
-                    index=col_options.index(d_close) if d_close in col_options else 0,
-                    key="bt_map_close",
-                )
-
-                required_mappings = [map_time, map_open, map_high, map_low, map_close]
-                if any(v == "(None)" for v in required_mappings):
-                    st.error("Map all OHLC/time columns to continue.")
-                else:
-                    prepared = pd.DataFrame(
-                        {
-                            "time": pd.to_datetime(ohlc_df[map_time], errors="coerce"),
-                            "open": pd.to_numeric(ohlc_df[map_open], errors="coerce"),
-                            "high": pd.to_numeric(ohlc_df[map_high], errors="coerce"),
-                            "low": pd.to_numeric(ohlc_df[map_low], errors="coerce"),
-                            "close": pd.to_numeric(ohlc_df[map_close], errors="coerce"),
-                        }
-                    ).dropna()
-                    prepared = prepared.sort_values("time").reset_index(drop=True)
-
-                    if len(prepared) < 60:
-                        st.warning("Need at least 60 valid candles for this backtest.")
-                    else:
-                        b1, b2, b3, b4 = st.columns(4)
-                        fast_period = int(b1.number_input("EMA Fast", min_value=2, max_value=200, value=20, step=1))
-                        slow_period = int(b2.number_input("EMA Slow", min_value=3, max_value=400, value=50, step=1))
-                        initial_balance = float(
-                            b3.number_input("Initial Balance", min_value=0.0, value=10000.0, step=100.0)
-                        )
-                        value_per_1_move = float(
-                            b4.number_input("Value per 1.0 Move", min_value=0.000001, value=1.0, step=0.1)
-                        )
-                        cost_per_round_trade = st.number_input(
-                            "Cost per Trade (spread+commission)",
-                            min_value=0.0,
-                            value=0.0,
-                            step=0.1,
-                            key="bt_cost_per_trade",
-                        )
-                        if fast_period >= slow_period:
-                            st.warning("EMA Fast must be smaller than EMA Slow.")
-                        else:
-                            replay_max = int(len(prepared))
-                            replay_default = min(replay_max, 250)
-                            replay_bars = st.slider(
-                                "Replay Bars",
-                                min_value=60,
-                                max_value=replay_max,
-                                value=replay_default,
-                                step=1,
-                                key="bt_replay_bars",
-                            )
-                            replay_df = prepared.iloc[:replay_bars].copy()
-                            candle_fig = go.Figure(
-                                data=[
-                                    go.Candlestick(
-                                        x=replay_df["time"],
-                                        open=replay_df["open"],
-                                        high=replay_df["high"],
-                                        low=replay_df["low"],
-                                        close=replay_df["close"],
-                                        name="Price",
-                                    )
-                                ]
-                            )
-                            candle_fig.update_layout(
-                                title="Replay View",
-                                xaxis_title="Time",
-                                yaxis_title="Price",
-                                xaxis_rangeslider_visible=False,
-                                height=460,
-                            )
-                            st.plotly_chart(candle_fig, use_container_width=True)
-
-                            metrics, equity_df, bt_trades_df = run_ema_crossover_backtest(
-                                ohlc_df=replay_df,
-                                fast_period=fast_period,
-                                slow_period=slow_period,
-                                initial_balance=initial_balance,
-                                value_per_1_move=value_per_1_move,
-                                cost_per_round_trade=float(cost_per_round_trade),
-                            )
-                            k1, k2, k3, k4, k5, k6 = st.columns(6)
-                            k1.metric("Net P&L", f"${metrics['net_pnl']:,.2f}")
-                            k2.metric("Ending Balance", f"${metrics['ending_balance']:,.2f}")
-                            k3.metric("Trades", metrics["trades"])
-                            k4.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
-                            k5.metric("Profit Factor", f"{metrics['profit_factor']:.2f}")
-                            k6.metric("Max Drawdown", f"${metrics['max_drawdown']:,.2f}")
-
-                            if not equity_df.empty:
-                                eq_fig = px.line(equity_df, x="time", y="equity", title="Equity Curve")
-                                st.plotly_chart(eq_fig, use_container_width=True)
-                            if not bt_trades_df.empty:
-                                show_trades = bt_trades_df.copy()
-                                show_trades["entry_time"] = pd.to_datetime(show_trades["entry_time"]).dt.strftime(
-                                    "%Y-%m-%d %H:%M:%S"
-                                )
-                                show_trades["exit_time"] = pd.to_datetime(show_trades["exit_time"]).dt.strftime(
-                                    "%Y-%m-%d %H:%M:%S"
-                                )
-                                st.dataframe(show_trades, use_container_width=True, hide_index=True)
-                            else:
-                                st.info("No trades generated with current settings.")
+        st.info("Backtest is currently disabled.")
+        st.caption("Tab is kept for now and can be re-enabled later.")
 
     with tab6:
         st.subheader("Forex News")
-        st.markdown("Forex Market Hours (UTC+8)")
-        now_utc8 = datetime.now(ZoneInfo("Asia/Singapore"))
-        st.caption(f"Current time: {now_utc8.strftime('%Y-%m-%d %I:%M:%S %p')} UTC+8")
-        market_hours_df = build_forex_market_hours_table_utc8()
-        st.dataframe(market_hours_df, use_container_width=True, hide_index=True)
+        render_forex_market_hours_widget()
 
         if not st.session_state.get("news_scraper_enabled", NEWS_SCRAPER_DEFAULT):
             st.warning("News scraper is disabled by failsafe toggle.")

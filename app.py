@@ -378,6 +378,16 @@ def list_users_for_admin(conn: sqlite3.Connection) -> pd.DataFrame:
     )
 
 
+def get_user_identity(conn: sqlite3.Connection, user_id: int) -> tuple[bool, str]:
+    row = conn.execute(
+        "SELECT username FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        return False, ""
+    return True, str(row["username"])
+
+
 def admin_reset_user_password(conn: sqlite3.Connection, target_user_id: int, new_password: str) -> tuple[bool, str]:
     if len(new_password) < 6:
         return False, "Password must be at least 6 characters."
@@ -1926,6 +1936,20 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
         st.markdown(f"**User:** {st.session_state.get('auth_username', 'Unknown')}")
         if is_user_admin(conn, user_id):
             st.markdown("**Role:** Admin")
+        if st.session_state.get("impersonator_user_id"):
+            st.warning(f"Impersonating: {st.session_state.get('auth_username', 'Unknown')}")
+            if st.button("Return to Admin", use_container_width=True):
+                try:
+                    original_id = int(st.session_state.get("impersonator_user_id"))
+                    original_username = str(st.session_state.get("impersonator_username", ""))
+                    st.session_state["auth_user_id"] = original_id
+                    st.session_state["auth_username"] = original_username
+                    st.session_state["impersonator_user_id"] = None
+                    st.session_state["impersonator_username"] = None
+                    st.session_state["show_welcome_once"] = True
+                    navigate_to("app")
+                except Exception as exc:
+                    report_exception("Return to admin failed", exc)
         st.toggle("Debug Mode", key="debug_mode")
         with st.popover("Themes", use_container_width=True):
             saved_profiles = list_user_theme_profiles(conn, user_id)
@@ -2867,6 +2891,29 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                                 st.success(msg)
                             else:
                                 st.error(msg)
+                with st.form("admin_login_as_user_form", clear_on_submit=False):
+                    selected_user_for_login = st.selectbox("User", options=user_options, key="admin_user_login_as")
+                    login_as_submitted = st.form_submit_button("Login As User")
+                    if login_as_submitted:
+                        target_user_id = int(selected_user_for_login.split("|")[0].replace("#", "").strip())
+                        ok_user, target_username = get_user_identity(conn, target_user_id)
+                        if not ok_user:
+                            st.error("User not found.")
+                        elif target_user_id == int(user_id):
+                            st.warning("Already logged in as this user.")
+                        else:
+                            if not st.session_state.get("impersonator_user_id"):
+                                st.session_state["impersonator_user_id"] = int(user_id)
+                                st.session_state["impersonator_username"] = str(
+                                    st.session_state.get("auth_username", "")
+                                )
+                            st.session_state["auth_user_id"] = target_user_id
+                            st.session_state["auth_username"] = target_username
+                            st.session_state["remember_token"] = None
+                            if "rt" in st.query_params:
+                                del st.query_params["rt"]
+                            st.session_state["show_welcome_once"] = True
+                            navigate_to("app")
 
 
 def init_session_state() -> None:
@@ -2876,6 +2923,10 @@ def init_session_state() -> None:
         st.session_state["auth_user_id"] = None
     if "auth_username" not in st.session_state:
         st.session_state["auth_username"] = None
+    if "impersonator_user_id" not in st.session_state:
+        st.session_state["impersonator_user_id"] = None
+    if "impersonator_username" not in st.session_state:
+        st.session_state["impersonator_username"] = None
     if "landing_loaded" not in st.session_state:
         st.session_state["landing_loaded"] = False
     if "pending_trade_pasted_image_bytes" not in st.session_state:

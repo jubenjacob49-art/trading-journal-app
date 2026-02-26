@@ -1,6 +1,7 @@
 import calendar
 import base64
 import io
+import json
 import mimetypes
 import hashlib
 import os
@@ -10,6 +11,7 @@ import traceback
 import uuid
 import urllib.error
 import urllib.request
+import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -63,6 +65,8 @@ THEME_PRESETS = {
 }
 NEWS_SCRAPER_DEFAULT = os.getenv("ENABLE_NEWS_SCRAPER", "1").strip() == "1"
 FOREX_FACTORY_WEEKLY_XML_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
 
 
 @dataclass
@@ -971,6 +975,239 @@ def parse_uploaded_ohlc_csv(uploaded_file) -> tuple[pd.DataFrame, str | None]:
     df = pd.read_csv(io.StringIO(text), sep=delimiter, engine="python", skiprows=best_i)
     df.columns = [str(col).strip().replace("\ufeff", "") for col in df.columns]
     return df, f"Auto-detected header row {best_i + 1} using '{delimiter}' delimiter."
+
+
+def is_cloud_sync_configured() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
+
+
+def supabase_request(method: str, path: str, body: dict | list | None = None) -> tuple[bool, str]:
+    if not is_cloud_sync_configured():
+        return False, "Cloud sync is not configured."
+    url = f"{SUPABASE_URL}{path}"
+    payload = None
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if body is not None:
+        payload = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers=headers, method=method.upper())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+            return True, raw
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        return False, f"HTTP {exc.code}: {detail or exc.reason}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def build_user_snapshot(conn: sqlite3.Connection, user_id: int, username: str) -> dict:
+    accounts_df = get_accounts(conn, user_id).copy()
+    trades_df = get_trades(conn, user_id).copy()
+    cashflows_df = get_cashflows(conn, user_id).copy()
+    targets = get_user_pnl_targets(conn, user_id)
+    theme = load_user_theme(conn, user_id)
+    profile_rows = conn.execute(
+        """
+        SELECT profile_name, bg_color, surface_color, text_color, accent_color, updated_at
+        FROM user_theme_profiles
+        WHERE user_id = ?
+        ORDER BY profile_name
+        """,
+        (user_id,),
+    ).fetchall()
+    theme_profiles = [dict(row) for row in profile_rows]
+
+    if not trades_df.empty and "account_name" in trades_df.columns:
+        trades_df = trades_df.drop(columns=["account_name"])
+    if not cashflows_df.empty and "account_name" in cashflows_df.columns:
+        cashflows_df = cashflows_df.drop(columns=["account_name"])
+
+    return {
+        "version": 1,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "username": username,
+        "accounts": accounts_df.to_dict(orient="records"),
+        "trades": trades_df.to_dict(orient="records"),
+        "cashflows": cashflows_df.to_dict(orient="records"),
+        "targets": targets,
+        "theme": theme,
+        "theme_profiles": theme_profiles,
+    }
+
+
+def save_snapshot_to_cloud(conn: sqlite3.Connection, user_id: int, username: str) -> tuple[bool, str]:
+    snapshot = build_user_snapshot(conn, user_id, username)
+    now = datetime.now().isoformat(timespec="seconds")
+    payload = [
+        {
+            "username": username,
+            "payload": snapshot,
+            "updated_at": now,
+        }
+    ]
+    ok, msg = supabase_request(
+        "POST",
+        "/rest/v1/journal_backups?on_conflict=username",
+        payload,
+    )
+    if not ok:
+        return False, msg
+    return True, "Cloud backup saved."
+
+
+def load_snapshot_from_cloud(username: str) -> tuple[bool, dict | None, str]:
+    quoted = urllib.parse.quote(username, safe="")
+    ok, msg = supabase_request(
+        "GET",
+        f"/rest/v1/journal_backups?username=eq.{quoted}&select=payload",
+    )
+    if not ok:
+        return False, None, msg
+    try:
+        data = json.loads(msg) if msg else []
+        if not data:
+            return False, None, "No cloud backup found for this user."
+        payload = data[0].get("payload")
+        if not isinstance(payload, dict):
+            return False, None, "Invalid cloud payload."
+        return True, payload, "Cloud backup loaded."
+    except Exception as exc:
+        return False, None, str(exc)
+
+
+def restore_snapshot_into_user(conn: sqlite3.Connection, user_id: int, snapshot: dict) -> tuple[bool, str]:
+    try:
+        accounts = snapshot.get("accounts", []) or []
+        trades = snapshot.get("trades", []) or []
+        cashflows = snapshot.get("cashflows", []) or []
+        targets = snapshot.get("targets", {}) or {}
+        theme = snapshot.get("theme")
+        theme_profiles = snapshot.get("theme_profiles", []) or []
+
+        conn.execute("DELETE FROM trades WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM account_cashflows WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM accounts WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM user_targets WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM user_themes WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM user_theme_profiles WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+        account_id_map: dict[int, int] = {}
+        for row in accounts:
+            old_id = int(row.get("id", 0) or 0)
+            cursor = conn.execute(
+                """
+                INSERT INTO accounts (user_id, name, broker, account_type, description, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    str(row.get("name", "Main")).strip() or "Main",
+                    str(row.get("broker", "")),
+                    str(row.get("account_type", "")),
+                    str(row.get("description", "")),
+                    str(row.get("created_at", datetime.now().isoformat(timespec="seconds"))),
+                ),
+            )
+            new_id = int(cursor.lastrowid)
+            if old_id > 0:
+                account_id_map[old_id] = new_id
+
+        if not account_id_map:
+            now = datetime.now().isoformat(timespec="seconds")
+            cursor = conn.execute(
+                """
+                INSERT INTO accounts (user_id, name, broker, account_type, description, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, "Main", "Unknown", "Cash", "Default account", now),
+            )
+            account_id_map[1] = int(cursor.lastrowid)
+
+        default_account_id = next(iter(account_id_map.values()))
+
+        for row in cashflows:
+            source_account_id = int(row.get("account_id", 0) or 0)
+            mapped_account_id = account_id_map.get(source_account_id, default_account_id)
+            conn.execute(
+                """
+                INSERT INTO account_cashflows (user_id, account_id, flow_date, flow_type, amount, note, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    mapped_account_id,
+                    str(row.get("flow_date", date.today().isoformat())),
+                    str(row.get("flow_type", "Deposit")),
+                    float(row.get("amount", 0.0) or 0.0),
+                    str(row.get("note", "")),
+                    str(row.get("created_at", datetime.now().isoformat(timespec="seconds"))),
+                ),
+            )
+
+        for row in trades:
+            source_account_id = int(row.get("account_id", 0) or 0)
+            mapped_account_id = account_id_map.get(source_account_id, default_account_id)
+            next_trade_id = get_next_available_trade_id(conn)
+            conn.execute(
+                """
+                INSERT INTO trades (
+                    id, user_id, trade_date, account_id, symbol, side, quantity, entry_price, exit_price,
+                    fees, gross_pnl, net_pnl, tags, notes, image_path, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    next_trade_id,
+                    user_id,
+                    str(row.get("trade_date", date.today().isoformat())),
+                    mapped_account_id,
+                    str(row.get("symbol", "")).upper().strip(),
+                    str(row.get("side", "Long")),
+                    float(row.get("quantity", 0.0) or 0.0),
+                    float(row.get("entry_price", 0.0) or 0.0),
+                    float(row.get("exit_price", 0.0) or 0.0),
+                    float(row.get("fees", 0.0) or 0.0),
+                    float(row.get("gross_pnl", 0.0) or 0.0),
+                    float(row.get("net_pnl", 0.0) or 0.0),
+                    str(row.get("tags", "")),
+                    str(row.get("notes", "")),
+                    str(row.get("image_path", "")),
+                    str(row.get("created_at", datetime.now().isoformat(timespec="seconds"))),
+                ),
+            )
+
+        save_user_pnl_targets(
+            conn,
+            user_id,
+            float(targets.get("daily", 0.0) or 0.0),
+            float(targets.get("weekly", 0.0) or 0.0),
+            float(targets.get("monthly", 0.0) or 0.0),
+        )
+        if isinstance(theme, dict):
+            save_user_theme(conn, user_id, theme)
+        for profile in theme_profiles:
+            save_user_theme_profile(
+                conn,
+                user_id,
+                str(profile.get("profile_name", "Profile")),
+                {
+                    "theme_name": "Custom",
+                    "bg_color": str(profile.get("bg_color", "#0f1117")),
+                    "surface_color": str(profile.get("surface_color", "#1f2333")),
+                    "text_color": str(profile.get("text_color", "#f6f8ff")),
+                    "accent_color": str(profile.get("accent_color", "#5b7cfa")),
+                },
+            )
+        conn.commit()
+        return True, "Cloud backup restored."
+    except Exception as exc:
+        conn.rollback()
+        return False, str(exc)
 
 
 def compute_max_drawdown(equity_values: list[float]) -> float:
@@ -3837,6 +4074,52 @@ def render_dashboard(conn: sqlite3.Connection, user_id: int) -> None:
                     use_container_width=True,
                     hide_index=True,
                 )
+
+        st.markdown("Cloud Sync")
+        if not is_cloud_sync_configured():
+            st.info("Cloud sync not configured. Add SUPABASE_URL and SUPABASE_SERVICE_KEY in deploy secrets.")
+            st.caption(
+                "Also create a Supabase table: journal_backups(username text primary key, payload jsonb, updated_at timestamptz)."
+            )
+        else:
+            c_sync_1, c_sync_2 = st.columns(2)
+            if c_sync_1.button("Save To Cloud", use_container_width=True):
+                try:
+                    ok, msg = save_snapshot_to_cloud(
+                        conn,
+                        user_id=user_id,
+                        username=str(st.session_state.get("auth_username", "")).strip(),
+                    )
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+                except Exception as exc:
+                    report_exception("Cloud save failed", exc)
+
+            confirm_restore = c_sync_2.checkbox(
+                "Confirm restore from cloud",
+                value=False,
+                key="cloud_restore_confirm",
+            )
+            if c_sync_2.button("Load From Cloud", use_container_width=True):
+                if not confirm_restore:
+                    st.warning("Tick confirm before restoring cloud data.")
+                else:
+                    try:
+                        username = str(st.session_state.get("auth_username", "")).strip()
+                        ok, snapshot, msg = load_snapshot_from_cloud(username)
+                        if not ok or snapshot is None:
+                            st.error(msg)
+                        else:
+                            restored_ok, restored_msg = restore_snapshot_into_user(conn, user_id, snapshot)
+                            if restored_ok:
+                                st.success(restored_msg)
+                                st.rerun()
+                            else:
+                                st.error(restored_msg)
+                    except Exception as exc:
+                        report_exception("Cloud restore failed", exc)
 
         st.markdown("Delete account")
         if accounts_df.empty:
